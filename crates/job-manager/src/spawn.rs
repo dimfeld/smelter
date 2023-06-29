@@ -7,7 +7,7 @@ pub trait Spawner {
     // It would be nice to just pass a dyn Serialize instead, but that makes the trait not
     // object-safe so it's tricky. For now we just assume JSON.
     /// Spawn a task with the given input. The input is a JSON-serialized version of the task definition.
-    async fn spawn(&self, input: &[u8]) -> Self::SpawnedTask;
+    async fn spawn(&self, name: &str, input: &[u8]) -> Self::SpawnedTask;
 }
 
 #[derive(Error, Debug)]
@@ -22,6 +22,8 @@ pub enum TaskError {
     Cancelled,
     #[error("Task encountered an error")]
     Failed,
+    #[error("Failed to generate tasks from query")]
+    TaskGenerationFailed,
 }
 
 #[async_trait::async_trait]

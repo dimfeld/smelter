@@ -7,7 +7,8 @@ edition = "2021"
 
 [dependencies]
 async-trait = "0.1.68"
-error-stack = { version = "0.3.1", features = ["serde"] }
+error-stack = { version = "0.3.1", features = ["serde", "eyre"] }
+eyre = "0.6.8"
 serde = { version = "1.0.164", features = ["derive"] }
 tempfile = "3.6.0"
 thiserror = "1.0.40"
