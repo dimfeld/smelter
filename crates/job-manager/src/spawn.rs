@@ -1,3 +1,6 @@
+pub mod local;
+
+use error_stack::Report;
 use thiserror::Error;
 
 #[async_trait::async_trait]
@@ -5,9 +8,15 @@ pub trait Spawner {
     type SpawnedTask: SpawnedTask;
 
     // It would be nice to just pass a dyn Serialize instead, but that makes the trait not
-    // object-safe so it's tricky. For now we just assume JSON.
+    // object-safe so it's tricky. There's probably some better way to set this up but it's not too
+    // important for now.
     /// Spawn a task with the given input. The input is a JSON-serialized version of the task definition.
-    async fn spawn(&self, name: &str, input: &[u8]) -> Self::SpawnedTask;
+    async fn spawn(
+        &self,
+        local_id: &str,
+        task_name: &str,
+        input: &[u8],
+    ) -> Result<Self::SpawnedTask, Report<TaskError>>;
 }
 
 #[derive(Error, Debug)]
@@ -28,7 +37,14 @@ pub enum TaskError {
 
 #[async_trait::async_trait]
 pub trait SpawnedTask {
-    async fn check_status(&self) -> Result<(), TaskError>;
-    async fn wait(&self) -> Result<String, TaskError>;
+    /// The internal ID of the spawned task in the runtime.
+    async fn runtime_id(&self) -> Result<String, TaskError>;
+    /// Check if a task is finished yet.
+    async fn check_finished(&mut self) -> Result<bool, Report<TaskError>>;
+    /// Return a future that resolves when a task finishes.
+    async fn wait(&mut self) -> Result<(), Report<TaskError>>;
+    /// Attempt to kill a task before it finishes.
+    async fn kill(&mut self) -> Result<(), Report<TaskError>>;
+    /// Return the location where the task should have written its output.
     fn output_location(&self) -> String;
 }

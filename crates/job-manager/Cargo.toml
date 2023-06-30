@@ -9,6 +9,8 @@ edition = "2021"
 async-trait = "0.1.68"
 error-stack = { version = "0.3.1", features = ["serde", "eyre"] }
 eyre = "0.6.8"
+futures = "0.3.28"
 serde = { version = "1.0.164", features = ["derive"] }
 tempfile = "3.6.0"
 thiserror = "1.0.40"
+tokio = { version = "1.29.1", features = ["full"] }
