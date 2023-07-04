@@ -15,7 +15,7 @@ pub trait Spawner {
     /// Spawn a task with the given input. The input is a JSON-serialized version of the task definition.
     async fn spawn(
         &self,
-        local_id: &str,
+        local_id: String,
         task_name: &str,
         input: &[u8],
     ) -> Result<Self::SpawnedTask, Report<TaskError>>;

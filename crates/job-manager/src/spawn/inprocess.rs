@@ -1,7 +1,7 @@
 //! Run workers in the same process as the scheduler. This is only really useful for some unit
 //! tests.
 
-use ahash::{HashMap, HashMapExt};
+use ahash::HashMap;
 use async_trait::async_trait;
 use error_stack::{IntoReport, Report, ResultExt};
 use std::future::Future;
@@ -10,6 +10,8 @@ use tokio::{sync::oneshot, task::JoinHandle};
 use super::{SpawnedTask, Spawner, TaskError};
 
 pub struct InProcessTaskInfo {
+    pub task_name: String,
+    pub local_id: String,
     pub input_value: Vec<u8>,
 }
 
@@ -48,7 +50,7 @@ where
 
     async fn spawn(
         &self,
-        local_id: &str,
+        local_id: String,
         task_name: &str,
         input: &[u8],
     ) -> Result<Self::SpawnedTask, Report<TaskError>> {
@@ -56,11 +58,17 @@ where
         let output = self.output.clone();
         let task_fn = self.task_fn.clone();
         let input = input.to_vec();
+        let task_name = task_name.to_string();
         let task = InProcessSpawnedTask {
             task_id: local_id.to_string(),
             output_location: output_location.clone(),
             task: Some(tokio::task::spawn(async move {
-                let result = (task_fn)(InProcessTaskInfo { input_value: input }).await?;
+                let result = (task_fn)(InProcessTaskInfo {
+                    task_name,
+                    local_id,
+                    input_value: input,
+                })
+                .await?;
 
                 output.write(output_location, result);
                 Ok::<(), TaskError>(())
@@ -167,5 +175,57 @@ impl<T: Clone + Send + 'static> OutputCollector<T> {
                 }
             }
         }
+    }
+}
+
+#[cfg(test)]
+mod test {
+    use futures::{StreamExt, TryStreamExt};
+
+    use super::*;
+    use crate::spawn::Spawner;
+
+    #[tokio::test]
+    async fn output_collector() {
+        let collector = super::OutputCollector::new();
+        let cloned = collector.clone();
+        collector.write("foo".to_string(), "bar".to_string());
+        collector.write("bax".to_string(), "bah".to_string());
+        let read = collector.read().await;
+        assert_eq!(read.get("foo"), Some(&"bar".to_string()));
+        assert_eq!(read.get("bax"), Some(&"bah".to_string()));
+        assert_eq!(read.get("boo"), None);
+
+        // Make sure that the cloned version actually references the same hashmap and has all the
+        // writes.
+        let read_clone = cloned.read().await;
+        assert_eq!(read_clone.get("foo"), Some(&"bar".to_string()));
+        assert_eq!(read_clone.get("bax"), Some(&"bah".to_string()));
+        assert_eq!(read_clone.get("boo"), None);
+    }
+
+    #[tokio::test]
+    async fn spawner() {
+        let spawner =
+            super::InProcessSpawner::new(
+                |info| async move { Ok(format!("result {}", info.local_id)) },
+            );
+
+        let tasks = futures::stream::iter(1..=3)
+            .map(Ok)
+            .and_then(|i| spawner.spawn(format!("task_{}", i), "map", &[]))
+            .try_collect::<Vec<_>>()
+            .await
+            .expect("Creating tasks");
+
+        for mut task in tasks {
+            task.wait().await.expect("Waiting for task");
+        }
+
+        let output = spawner.output.read().await;
+        assert_eq!(output.len(), 3);
+        assert_eq!(output.get("map_task_1"), Some(&"result task_1".to_string()));
+        assert_eq!(output.get("map_task_2"), Some(&"result task_2".to_string()));
+        assert_eq!(output.get("map_task_3"), Some(&"result task_3".to_string()));
     }
 }

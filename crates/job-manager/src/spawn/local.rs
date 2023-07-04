@@ -15,7 +15,7 @@ impl Spawner for LocalSpawner {
 
     async fn spawn(
         &self,
-        local_id: &str,
+        local_id: String,
         task_name: &str,
         input: &[u8],
     ) -> Result<Self::SpawnedTask, Report<TaskError>> {
