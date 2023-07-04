@@ -1,3 +1,5 @@
+#[cfg(feature = "inprocess")]
+pub mod inprocess;
 pub mod local;
 
 use error_stack::Report;
