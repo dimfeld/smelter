@@ -4,7 +4,7 @@
 use ahash::HashMap;
 use async_trait::async_trait;
 use error_stack::{IntoReport, Report, ResultExt};
-use std::future::Future;
+use std::{borrow::Cow, future::Future};
 use tokio::{sync::oneshot, task::JoinHandle};
 
 use super::{SpawnedTask, Spawner, TaskError};
@@ -51,8 +51,8 @@ where
     async fn spawn(
         &self,
         local_id: String,
-        task_name: &str,
-        input: &[u8],
+        task_name: Cow<'static, str>,
+        input: Vec<u8>,
     ) -> Result<Self::SpawnedTask, Report<TaskError>> {
         let output_location = format!("{task_name}_{local_id}");
         let output = self.output.clone();
@@ -65,7 +65,7 @@ where
             task: Some(tokio::task::spawn(async move {
                 let result = (task_fn)(InProcessTaskInfo {
                     task_name,
-                    local_id,
+                    local_id: local_id.to_string(),
                     input_value: input,
                 })
                 .await?;
@@ -213,7 +213,7 @@ mod test {
 
         let tasks = futures::stream::iter(1..=3)
             .map(Ok)
-            .and_then(|i| spawner.spawn(format!("task_{}", i), "map", &[]))
+            .and_then(|i| spawner.spawn(format!("task_{}", i), "map".into(), vec![]))
             .try_collect::<Vec<_>>()
             .await
             .expect("Creating tasks");

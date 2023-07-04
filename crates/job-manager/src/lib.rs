@@ -1,6 +1,7 @@
 use std::borrow::Cow;
 
-use spawn::Spawner;
+use error_stack::Report;
+use spawn::{Spawner, TaskError};
 
 pub mod manager;
 pub mod scheduler;
@@ -20,6 +21,9 @@ pub enum FailureType {
 pub trait TaskInfo {
     /// A name that the spawner can use to run the appropriate task.
     fn spawn_name(&self) -> Cow<'static, str>;
+
+    /// Serialize the input into a format that the worker expects (usually JSON).
+    fn serialize_input(&self) -> Result<Vec<u8>, eyre::Report>;
 }
 
 #[async_trait::async_trait]

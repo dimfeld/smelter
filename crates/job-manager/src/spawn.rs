@@ -2,6 +2,8 @@
 pub mod inprocess;
 pub mod local;
 
+use std::borrow::Cow;
+
 use error_stack::Report;
 use thiserror::Error;
 
@@ -16,8 +18,8 @@ pub trait Spawner {
     async fn spawn(
         &self,
         local_id: String,
-        task_name: &str,
-        input: &[u8],
+        task_name: Cow<'static, str>,
+        input: Vec<u8>,
     ) -> Result<Self::SpawnedTask, Report<TaskError>>;
 }
 

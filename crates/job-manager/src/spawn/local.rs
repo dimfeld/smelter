@@ -2,7 +2,7 @@
 //! development and testing.
 
 use error_stack::{IntoReport, Report, ResultExt};
-use std::{path::PathBuf, process::ExitStatus};
+use std::{borrow::Cow, path::PathBuf, process::ExitStatus};
 use tokio::io::AsyncWriteExt;
 
 use super::{SpawnedTask, Spawner, TaskError};
@@ -16,8 +16,8 @@ impl Spawner for LocalSpawner {
     async fn spawn(
         &self,
         local_id: String,
-        task_name: &str,
-        input: &[u8],
+        task_name: Cow<'static, str>,
+        input: Vec<u8>,
     ) -> Result<Self::SpawnedTask, Report<TaskError>> {
         let dir = std::env::temp_dir();
 
@@ -31,7 +31,7 @@ impl Spawner for LocalSpawner {
             .attach_printable("Failed to create temporary directory for input")?;
 
         input_file
-            .write_all(input)
+            .write_all(&input)
             .await
             .into_report()
             .change_context(TaskError::DidNotStart)
@@ -44,7 +44,7 @@ impl Spawner for LocalSpawner {
             .change_context(TaskError::DidNotStart)
             .attach_printable("Failed to write input definition")?;
 
-        let child_process = tokio::process::Command::new(task_name)
+        let child_process = tokio::process::Command::new(task_name.as_ref())
             .env("INPUT_FILE", &input_path)
             .env("OUTPUT_FILE", &output_path)
             .spawn()
