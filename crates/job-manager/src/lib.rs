@@ -1,4 +1,5 @@
 use std::borrow::Cow;
+use std::fmt::Debug;
 
 use error_stack::Report;
 use spawn::{Spawner, TaskError};
@@ -18,7 +19,7 @@ pub enum FailureType {
     RetryAfter { ms: usize },
 }
 
-pub trait TaskInfo {
+pub trait TaskInfo: Debug {
     /// A name that the spawner can use to run the appropriate task.
     fn spawn_name(&self) -> Cow<'static, str>;
 
@@ -59,11 +60,6 @@ pub trait TaskType: Send + Sync {
         reducers: &[TaskDefWithOutput<Self::IntermediateReducerTaskDef>],
     ) -> Result<Vec<Self::IntermediateReducerTaskDef>, Self::Error> {
         Ok(Vec::new())
-    }
-
-    /// Indicate if a task can be retried after a particular error or not.
-    fn can_retry(&self, error: &Self::Error) -> FailureType {
-        FailureType::RetryNow
     }
 }
 

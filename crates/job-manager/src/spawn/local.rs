@@ -27,21 +27,21 @@ impl Spawner for LocalSpawner {
         let mut input_file = tokio::fs::File::create(&input_path)
             .await
             .into_report()
-            .change_context(TaskError::DidNotStart)
+            .change_context(TaskError::DidNotStart(false))
             .attach_printable("Failed to create temporary directory for input")?;
 
         input_file
             .write_all(&input)
             .await
             .into_report()
-            .change_context(TaskError::DidNotStart)
+            .change_context(TaskError::DidNotStart(false))
             .attach_printable("Failed to write input definition")?;
 
         input_file
             .flush()
             .await
             .into_report()
-            .change_context(TaskError::DidNotStart)
+            .change_context(TaskError::DidNotStart(false))
             .attach_printable("Failed to write input definition")?;
 
         let child_process = tokio::process::Command::new(task_name.as_ref())
@@ -49,7 +49,7 @@ impl Spawner for LocalSpawner {
             .env("OUTPUT_FILE", &output_path)
             .spawn()
             .into_report()
-            .change_context(TaskError::DidNotStart)
+            .change_context(TaskError::DidNotStart(false))
             .attach_printable_lazy(|| format!("Failed to start worker process {task_name}"))?;
 
         Ok(LocalSpawnedTask {
@@ -71,7 +71,8 @@ impl LocalSpawnedTask {
         if status.success() {
             Ok(())
         } else {
-            Err(TaskError::Failed)
+            let retryable = status.code().unwrap_or(-1) == 2;
+            Err(TaskError::Failed(retryable))
                 .into_report()
                 .attach_printable_lazy(|| {
                     format!(
@@ -97,7 +98,7 @@ impl SpawnedTask for LocalSpawnedTask {
             .kill()
             .await
             .into_report()
-            .change_context(TaskError::Failed)
+            .change_context(TaskError::Failed(false))
     }
 
     async fn check_finished(&mut self) -> Result<bool, Report<TaskError>> {
@@ -105,7 +106,7 @@ impl SpawnedTask for LocalSpawnedTask {
             .child_process
             .try_wait()
             .into_report()
-            .change_context(TaskError::Failed)?;
+            .change_context(TaskError::Failed(false))?;
 
         match result {
             Some(status) => {
@@ -122,7 +123,7 @@ impl SpawnedTask for LocalSpawnedTask {
             .wait()
             .await
             .into_report()
-            .change_context(TaskError::Failed)?;
+            .change_context(TaskError::Lost)?;
 
         Self::handle_exit_status(result)
     }

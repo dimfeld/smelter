@@ -26,7 +26,7 @@ pub trait Spawner {
 #[derive(Error, Debug)]
 pub enum TaskError {
     #[error("Failed to start")]
-    DidNotStart,
+    DidNotStart(bool),
     #[error("Task timed out")]
     TimedOut,
     #[error("Task was lost by runtime")]
@@ -34,9 +34,22 @@ pub enum TaskError {
     #[error("Task was cancelled")]
     Cancelled,
     #[error("Task encountered an error")]
-    Failed,
+    Failed(bool),
     #[error("Failed to generate tasks from query")]
     TaskGenerationFailed,
+}
+
+impl TaskError {
+    pub fn retryable(&self) -> bool {
+        match self {
+            Self::DidNotStart(retryable) => *retryable,
+            Self::TimedOut => true,
+            Self::Lost => true,
+            Self::Cancelled => true,
+            Self::Failed(retryable) => *retryable,
+            Self::TaskGenerationFailed => false,
+        }
+    }
 }
 
 #[async_trait::async_trait]

@@ -108,9 +108,16 @@ impl SpawnedTask for InProcessSpawnedTask {
             return Ok(());
         };
 
-        task.await
+        let result = task.await;
+        let retryable = match &result {
+            Ok(Ok(_)) => false,
+            Ok(Err(e)) => e.retryable(),
+            Err(_) => false,
+        };
+
+        result
             .into_report()
-            .change_context(TaskError::Failed)?
+            .change_context(TaskError::Failed(retryable))?
             .into_report()?;
 
         Ok(())
