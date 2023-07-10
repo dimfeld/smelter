@@ -58,13 +58,12 @@ where
         let output = self.output.clone();
         let task_fn = self.task_fn.clone();
         let input = input.to_vec();
-        let task_name = task_name.to_string();
         let task = InProcessSpawnedTask {
             task_id: local_id.to_string(),
             output_location: output_location.clone(),
             task: Some(tokio::task::spawn(async move {
                 let result = (task_fn)(InProcessTaskInfo {
-                    task_name,
+                    task_name: task_name.to_string(),
                     local_id: local_id.to_string(),
                     input_value: input,
                 })
