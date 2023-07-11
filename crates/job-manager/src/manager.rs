@@ -4,6 +4,7 @@ use std::fmt::Debug;
 use crate::{
     scheduler::{SchedulerBehavior, SlowTaskBehavior},
     spawn::{SpawnedTask, Spawner, TaskError},
+    task_status::{StatusCollector, StatusUpdateInput},
     TaskDefWithOutput, TaskInfo, TaskType,
 };
 use error_stack::{IntoReport, IntoReportCompat, Report, ResultExt};
@@ -29,7 +30,11 @@ impl<TASKTYPE: TaskType, SPAWNER: Spawner> JobManager<TASKTYPE, SPAWNER> {
         }
     }
 
-    pub async fn run(&self, task_def: TASKTYPE::TaskDef) -> Result<Vec<String>, Report<TaskError>> {
+    pub async fn run(
+        &self,
+        status_collector: StatusCollector,
+        task_def: TASKTYPE::TaskDef,
+    ) -> Result<Vec<String>, Report<TaskError>> {
         let map_tasks = self
             .task_type
             .create_map_tasks(&task_def)
@@ -37,7 +42,9 @@ impl<TASKTYPE: TaskType, SPAWNER: Spawner> JobManager<TASKTYPE, SPAWNER> {
             .into_report()
             .change_context(TaskError::TaskGenerationFailed)?;
 
-        let map_results = self.run_tasks_stage("map".to_string(), map_tasks).await?;
+        let map_results = self
+            .run_tasks_stage("map".to_string(), status_collector.clone(), map_tasks)
+            .await?;
 
         let first_reducer_tasks = self
             .task_type
@@ -54,7 +61,11 @@ impl<TASKTYPE: TaskType, SPAWNER: Spawner> JobManager<TASKTYPE, SPAWNER> {
         }
 
         let mut reducer_results = self
-            .run_tasks_stage("reducer_0".to_string(), first_reducer_tasks)
+            .run_tasks_stage(
+                "reducer_0".to_string(),
+                status_collector.clone(),
+                first_reducer_tasks,
+            )
             .await?
             .into_iter()
             .map(|task| TaskDefWithOutput {
@@ -76,7 +87,11 @@ impl<TASKTYPE: TaskType, SPAWNER: Spawner> JobManager<TASKTYPE, SPAWNER> {
             }
 
             reducer_results = self
-                .run_tasks_stage(format!("reducer_{reducer_index}"), reducer_tasks)
+                .run_tasks_stage(
+                    format!("reducer_{reducer_index}"),
+                    status_collector.clone(),
+                    reducer_tasks,
+                )
                 .await?;
             reducer_index += 1;
         }
@@ -90,12 +105,10 @@ impl<TASKTYPE: TaskType, SPAWNER: Spawner> JobManager<TASKTYPE, SPAWNER> {
     async fn run_tasks_stage<DEF: TaskInfo + Send>(
         &self,
         stage_name: String,
+        status_collector: StatusCollector,
         inputs: Vec<DEF>,
     ) -> Result<Vec<TaskDefWithOutput<DEF>>, Report<TaskError>> {
         let max_concurrent_tasks = self.scheduler.max_concurrent_tasks.unwrap_or(usize::MAX);
-
-        // An error report that can collect all the errors from all the tasks.
-        let mut failures = Vec::new();
 
         // when the number of in progress tasks drops below this number, retry all the remaining
         // tasks.
@@ -162,7 +175,11 @@ impl<TASKTYPE: TaskType, SPAWNER: Spawner> JobManager<TASKTYPE, SPAWNER> {
                         Some(Err(e)) => {
                             // The task failed to even generate an input payload. This is not
                             // retryable so just fail.
-                            failures.push(e);
+                            status_collector.add(
+                                stage_name.clone(),
+                                next_task,
+                                StatusUpdateInput::Failed(e),
+                            );
                             failed = true;
                             break;
                         }
@@ -180,8 +197,17 @@ impl<TASKTYPE: TaskType, SPAWNER: Spawner> JobManager<TASKTYPE, SPAWNER> {
                         let try_num = input_def.try_num;
                         match task {
                             Ok(mut task) => {
+                                let col = status_collector.clone();
+                                let stage_name = stage_name.clone();
+
                                 running.push(async move {
                                     let runtime_id = task.runtime_id().await?;
+                                    col.add(
+                                        stage_name,
+                                        index,
+                                        StatusUpdateInput::Spawned(runtime_id.clone()),
+                                    );
+
                                     // TODO Also wait to see if we should kill this task.
                                     task.wait().await
                                         .attach_printable_lazy(|| format!("Job {index} try {try_num}"))
@@ -192,11 +218,20 @@ impl<TASKTYPE: TaskType, SPAWNER: Spawner> JobManager<TASKTYPE, SPAWNER> {
                             Err(e) => {
                                 if let Some(task_info) = unfinished[index].as_mut() {
                                     if e.current_context().retryable() && task_info.try_num <= self.scheduler.max_retries {
+                                        status_collector.add(
+                                            stage_name.clone(),
+                                            index,
+                                            StatusUpdateInput::Retry((task_info.try_num, e)),
+                                        );
                                         task_info.try_num += 1;
                                         ready_to_run.push_back(index);
                                     } else {
+                                        status_collector.add(
+                                            stage_name.clone(),
+                                            index,
+                                            StatusUpdateInput::Failed(e),
+                                        );
                                         failed = true;
-                                        failures.push(e);
                                     }
                                 }
                             }
@@ -218,6 +253,11 @@ impl<TASKTYPE: TaskType, SPAWNER: Spawner> JobManager<TASKTYPE, SPAWNER> {
                                     // don't increment the retry count.
                                     for (i, task) in unfinished.iter().enumerate() {
                                         if task.is_some() {
+                                            status_collector.add(stage_name.clone(),
+                                                i,
+                                                StatusUpdateInput::Retry((
+                                                    i, Report::new(TaskError::TailRetry),
+                                                )));
                                             ready_to_run.push_back(i);
                                         }
                                     }
@@ -227,11 +267,20 @@ impl<TASKTYPE: TaskType, SPAWNER: Spawner> JobManager<TASKTYPE, SPAWNER> {
                         Err(e) => {
                             if let Some(task_info) = unfinished[index].as_mut() {
                                 if e.current_context().retryable() && task_info.try_num <= self.scheduler.max_retries {
+                                    status_collector.add(
+                                        stage_name.clone(),
+                                        index,
+                                        StatusUpdateInput::Retry((task_info.try_num, e)),
+                                    );
                                     task_info.try_num += 1;
                                     ready_to_run.push_back(index);
                                 } else {
+                                    status_collector.add(
+                                        stage_name.clone(),
+                                        index,
+                                        StatusUpdateInput::Failed(e),
+                                    );
                                     failed = true;
-                                    failures.push(e);
                                 }
                             }
                         }
@@ -242,12 +291,10 @@ impl<TASKTYPE: TaskType, SPAWNER: Spawner> JobManager<TASKTYPE, SPAWNER> {
             };
         }
 
-        match (failed, failures.pop()) {
-            (true, Some(mut f)) => {
-                f.extend(failures);
-                Err(f)
-            }
-            _ => Ok(output_list),
+        if failed {
+            Err(TaskError::Failed(false)).into_report()
+        } else {
+            Ok(output_list)
         }
     }
 }

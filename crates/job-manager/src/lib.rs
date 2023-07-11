@@ -4,6 +4,7 @@ use std::fmt::Debug;
 pub mod manager;
 pub mod scheduler;
 pub mod spawn;
+pub mod task_status;
 
 pub struct TaskDefWithOutput<DEF: Send> {
     task_def: DEF,

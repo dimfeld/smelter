@@ -23,7 +23,7 @@ pub trait Spawner {
     ) -> Result<Self::SpawnedTask, Report<TaskError>>;
 }
 
-#[derive(Error, Debug)]
+#[derive(Clone, Error, Debug)]
 pub enum TaskError {
     #[error("Failed to start")]
     DidNotStart(bool),
@@ -37,6 +37,8 @@ pub enum TaskError {
     Failed(bool),
     #[error("Failed to generate tasks from query")]
     TaskGenerationFailed,
+    #[error("Retrying per tail task policy")]
+    TailRetry,
 }
 
 impl TaskError {
@@ -48,6 +50,7 @@ impl TaskError {
             Self::Cancelled => true,
             Self::Failed(retryable) => *retryable,
             Self::TaskGenerationFailed => false,
+            Self::TailRetry => false,
         }
     }
 }
