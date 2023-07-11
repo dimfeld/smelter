@@ -44,7 +44,7 @@ pub struct StatusUpdateItem {
 
 pub enum StatusUpdateOp {
     Item(StatusUpdateItem),
-    Read(tokio::sync::oneshot::Sender<Vec<StatusUpdateItem>>),
+    ReadFrom((tokio::sync::oneshot::Sender<Vec<StatusUpdateItem>>, usize)),
 }
 
 #[derive(Clone)]
@@ -64,8 +64,9 @@ impl StatusCollector {
                     StatusUpdateOp::Item(item) => {
                         items.push(item);
                     }
-                    StatusUpdateOp::Read(tx) => {
-                        tx.send(items.clone()).ok();
+                    StatusUpdateOp::ReadFrom((tx, start)) => {
+                        let start = start.min(items.len());
+                        tx.send(items[start..].to_vec()).ok();
                     }
                 }
             }
@@ -87,7 +88,13 @@ impl StatusCollector {
 
     pub async fn read(&self) -> Vec<StatusUpdateItem> {
         let (tx, rx) = oneshot::channel();
-        self.tx.send(StatusUpdateOp::Read(tx)).ok();
+        self.tx.send(StatusUpdateOp::ReadFrom((tx, 0))).ok();
+        rx.await.unwrap_or_default()
+    }
+
+    pub async fn read_from(&self, start: usize) -> Vec<StatusUpdateItem> {
+        let (tx, rx) = oneshot::channel();
+        self.tx.send(StatusUpdateOp::ReadFrom((tx, start))).ok();
         rx.await.unwrap_or_default()
     }
 }
