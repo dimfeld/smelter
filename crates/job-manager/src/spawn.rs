@@ -8,7 +8,7 @@ use error_stack::Report;
 use thiserror::Error;
 
 #[async_trait::async_trait]
-pub trait Spawner {
+pub trait Spawner: Send + Sync + 'static {
     type SpawnedTask: SpawnedTask;
 
     // It would be nice to just pass a dyn Serialize instead, but that makes the trait not
@@ -56,7 +56,7 @@ impl TaskError {
 }
 
 #[async_trait::async_trait]
-pub trait SpawnedTask {
+pub trait SpawnedTask: Send + Sync + 'static {
     /// The internal ID of the spawned task in the runtime.
     async fn runtime_id(&self) -> Result<String, TaskError>;
     /// Check if a task is finished yet.

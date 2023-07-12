@@ -17,7 +17,7 @@ pub struct InProcessTaskInfo {
 
 pub struct InProcessSpawner<F, FUNC, RESULT>
 where
-    F: Future<Output = Result<RESULT, TaskError>>,
+    F: Future<Output = Result<RESULT, TaskError>> + 'static,
     FUNC: FnOnce(InProcessTaskInfo) -> F + Send + Sync + Clone + 'static,
     RESULT: Clone + Send + 'static,
 {
@@ -27,7 +27,7 @@ where
 
 impl<F, FUNC, RESULT> InProcessSpawner<F, FUNC, RESULT>
 where
-    F: Future<Output = Result<RESULT, TaskError>>,
+    F: Future<Output = Result<RESULT, TaskError>> + 'static,
     FUNC: FnOnce(InProcessTaskInfo) -> F + Send + Sync + Clone + 'static,
     RESULT: Clone + Send + 'static,
 {

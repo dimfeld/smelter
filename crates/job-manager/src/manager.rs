@@ -1,5 +1,6 @@
-use std::collections::VecDeque;
+use std::borrow::Cow;
 use std::fmt::Debug;
+use std::sync::Arc;
 
 use crate::{
     scheduler::{SchedulerBehavior, SlowTaskBehavior},
@@ -8,7 +9,7 @@ use crate::{
     TaskDefWithOutput, TaskInfo, TaskType,
 };
 use error_stack::{IntoReport, IntoReportCompat, Report, ResultExt};
-use futures::{select, stream::FuturesUnordered, FutureExt, StreamExt};
+use tokio::sync::Semaphore;
 #[derive(Debug)]
 struct TaskTrackingInfo<INPUT: Debug> {
     input: INPUT,
@@ -16,17 +17,24 @@ struct TaskTrackingInfo<INPUT: Debug> {
 }
 
 pub struct JobManager<TASKTYPE: TaskType, SPAWNER: Spawner> {
-    spawner: SPAWNER,
+    spawner: Arc<SPAWNER>,
     task_type: TASKTYPE,
     scheduler: SchedulerBehavior,
+    global_semaphore: Option<Arc<Semaphore>>,
 }
 
 impl<TASKTYPE: TaskType, SPAWNER: Spawner> JobManager<TASKTYPE, SPAWNER> {
-    pub fn new(task_type: TASKTYPE, spawner: SPAWNER, scheduler: SchedulerBehavior) -> Self {
+    pub fn new(
+        task_type: TASKTYPE,
+        spawner: Arc<SPAWNER>,
+        scheduler: SchedulerBehavior,
+        global_semaphore: Option<Arc<Semaphore>>,
+    ) -> Self {
         Self {
             spawner,
             task_type,
             scheduler,
+            global_semaphore,
         }
     }
 
@@ -109,187 +117,137 @@ impl<TASKTYPE: TaskType, SPAWNER: Spawner> JobManager<TASKTYPE, SPAWNER> {
         inputs: Vec<DEF>,
     ) -> Result<Vec<TaskDefWithOutput<DEF>>, Report<TaskError>> {
         let max_concurrent_tasks = self.scheduler.max_concurrent_tasks.unwrap_or(usize::MAX);
+        let total_num_tasks = inputs.len();
+        let mut unfinished = inputs
+            .into_iter()
+            .map(|input| Some(TaskTrackingInfo { input, try_num: 0 }))
+            .collect::<Vec<_>>();
+        let mut output_list = Vec::with_capacity(unfinished.len());
 
         // when the number of in progress tasks drops below this number, retry all the remaining
         // tasks.
         let retry_all_at = match self.scheduler.slow_task_behavior {
             SlowTaskBehavior::Wait => 0,
-            SlowTaskBehavior::RerunLastPercent(n) => inputs.len() * n / 100,
-            SlowTaskBehavior::RerunLastN(n) => std::cmp::min(n, inputs.len() / 2),
+            SlowTaskBehavior::RerunLastPercent(n) => total_num_tasks * n / 100,
+            SlowTaskBehavior::RerunLastN(n) => std::cmp::min(n, total_num_tasks / 2),
         };
 
-        let mut output_list = Vec::with_capacity(inputs.len());
-        let total_num_tasks = inputs.len();
+        let mut failed = false;
+        let (results_tx, results_rx) = flume::unbounded();
 
-        // A map of task index to the current try count.
-        let mut unfinished = inputs
-            .into_iter()
-            .map(|input| Some(TaskTrackingInfo { input, try_num: 0 }))
-            .collect::<Vec<_>>();
+        let job_semaphore = Semaphore::new(max_concurrent_tasks);
+        let syncs = Arc::new(TaskSyncs {
+            job_semaphore,
+            global_semaphore: self.global_semaphore.clone(),
+            results_tx,
+        });
 
-        let mut spawning = FuturesUnordered::new();
-        let mut running = FuturesUnordered::new();
+        let spawn_task = |i: usize, task: &TaskTrackingInfo<DEF>| {
+            let input = task
+                .input
+                .serialize_input()
+                .into_report()
+                .change_context(TaskError::TaskGenerationFailed);
 
-        // let mut retry_after = FuturesUnordered::new();
+            let input = match input {
+                Ok(p) => p,
+                Err(e) => {
+                    status_collector.add(stage_name.clone(), i, StatusUpdateInput::Failed(e));
+                    return false;
+                }
+            };
 
-        let mut ready_to_run = VecDeque::with_capacity(unfinished.len());
+            let spawn_name = task.input.spawn_name();
+            let local_id = format!("{stage_name}:{i:05}:{try_num:02}", try_num = task.try_num);
+            let payload = TaskPayload {
+                input,
+                spawn_name,
+                local_id,
+                stage_name: stage_name.clone(),
+                try_num: task.try_num,
+                status_collector: status_collector.clone(),
+                spawner: self.spawner.clone(),
+            };
 
-        // Send the initial round of tasks.
-        for i in 0..unfinished.len() {
-            ready_to_run.push_back(i);
+            tokio::task::spawn(run_one_task(i, syncs.clone(), payload));
+
+            true
+        };
+
+        for (i, task) in unfinished.iter_mut().enumerate() {
+            let task = task.as_mut().expect("task was None right away");
+            let succeeded = spawn_task(i, task);
+            if !succeeded {
+                failed = true;
+                break;
+            }
         }
 
-        // When the number of futures drops below max_concurrent_tasks and there are more tasks
-        // pending to run, run a task.
+        let mut performed_tail_retry = false;
 
-        let mut failed = false;
-        while output_list.len() < total_num_tasks && !failed {
-            // There is a task to run, and we have capacity to run it
-            if spawning.len() + running.len() < max_concurrent_tasks {
-                if let Some(next_task) = ready_to_run.pop_front() {
-                    let task = unfinished[next_task].as_ref().map(|task| {
-                        let task_input = task
-                            .input
-                            .serialize_input()
-                            .into_report()
-                            .change_context(TaskError::TaskGenerationFailed)?;
-                        let spawn_name = task.input.spawn_name();
-                        let local_id = format!(
-                            "{stage_name}:{next_task:05}:{try_num:02}",
-                            try_num = task.try_num
-                        );
+        while !failed && output_list.len() < total_num_tasks {
+            if let Ok((task_index, result)) = results_rx.recv_async().await {
+                match result {
+                    Ok(output) => {
+                        if let Some(task_info) = unfinished[task_index].take() {
+                            output_list.push(TaskDefWithOutput {
+                                task_def: task_info.input,
+                                output_location: output.output_location,
+                            });
 
-                        Ok::<_, Report<TaskError>>((task_input, local_id, spawn_name))
-                    });
+                            if !performed_tail_retry
+                                && total_num_tasks - output_list.len() < retry_all_at
+                            {
+                                performed_tail_retry = true;
 
-                    match task {
-                        Some(Ok((task_input, local_id, spawn_name))) => {
-                            let task_spawn = self
-                                .spawner
-                                .spawn(local_id, spawn_name, task_input)
-                                .map(move |result| (next_task, result));
+                                // Re-enqueue all unfinished tasks. Some serverless platforms
+                                // can have very high tail latency, so this gets
+                                // around that issue. Since this isn't an error-based retry, we
+                                // don't increment the retry count.
+                                for (i, task) in unfinished.iter().enumerate() {
+                                    if let Some(task) = task.as_ref() {
+                                        status_collector.add(
+                                            stage_name.clone(),
+                                            i,
+                                            StatusUpdateInput::Retry((
+                                                i,
+                                                Report::new(TaskError::TailRetry),
+                                            )),
+                                        );
 
-                            spawning.push(task_spawn);
-                            continue;
+                                        spawn_task(i, task);
+                                    }
+                                }
+                            }
                         }
-                        Some(Err(e)) => {
-                            // The task failed to even generate an input payload. This is not
-                            // retryable so just fail.
-                            status_collector.add(
-                                stage_name.clone(),
-                                next_task,
-                                StatusUpdateInput::Failed(e),
-                            );
-                            failed = true;
-                            break;
-                        }
-                        None => {
-                            // Another try of this task finished successfully between when it was enqueued and
-                            // now. This means we can safely ignore this one.
+                    }
+                    Err(e) => {
+                        if let Some(task_info) = unfinished[task_index].as_mut() {
+                            if e.current_context().retryable()
+                                && task_info.try_num <= self.scheduler.max_retries
+                            {
+                                status_collector.add(
+                                    stage_name.clone(),
+                                    task_index,
+                                    StatusUpdateInput::Retry((task_info.try_num, e)),
+                                );
+                                task_info.try_num += 1;
+                                spawn_task(task_index, task_info);
+                            } else {
+                                status_collector.add(
+                                    stage_name.clone(),
+                                    task_index,
+                                    StatusUpdateInput::Failed(e),
+                                );
+                                failed = true;
+                            }
                         }
                     }
                 }
             }
-
-            select! {
-                (index, task) = spawning.select_next_some() => {
-                    if let Some(input_def) = &unfinished[index] {
-                        let try_num = input_def.try_num;
-                        match task {
-                            Ok(mut task) => {
-                                let col = status_collector.clone();
-                                let stage_name = stage_name.clone();
-
-                                running.push(async move {
-                                    let runtime_id = task.runtime_id().await?;
-                                    col.add(
-                                        stage_name,
-                                        index,
-                                        StatusUpdateInput::Spawned(runtime_id.clone()),
-                                    );
-
-                                    // TODO Also wait to see if we should kill this task.
-                                    task.wait().await
-                                        .attach_printable_lazy(|| format!("Job {index} try {try_num}"))
-                                        .attach_printable_lazy(|| format!("Runtime ID {runtime_id}"))?;
-                                    Ok::<_, Report<TaskError>>(task.output_location())
-                                }.map(move |result| (index, result)));
-                            }
-                            Err(e) => {
-                                if let Some(task_info) = unfinished[index].as_mut() {
-                                    if e.current_context().retryable() && task_info.try_num <= self.scheduler.max_retries {
-                                        status_collector.add(
-                                            stage_name.clone(),
-                                            index,
-                                            StatusUpdateInput::Retry((task_info.try_num, e)),
-                                        );
-                                        task_info.try_num += 1;
-                                        ready_to_run.push_back(index);
-                                    } else {
-                                        status_collector.add(
-                                            stage_name.clone(),
-                                            index,
-                                            StatusUpdateInput::Failed(e),
-                                        );
-                                        failed = true;
-                                    }
-                                }
-                            }
-                        }
-                    }
-                }
-
-                finished = running.select_next_some() => {
-                    let (index, result) = finished;
-                    match result {
-                        Ok(output_location) => {
-                            if let Some(task_info) = unfinished[index].take() {
-                                output_list.push(TaskDefWithOutput { task_def: task_info.input, output_location });
-
-                                if total_num_tasks - output_list.len() < retry_all_at {
-                                    // Re-enqueue all unfinished tasks. Some serverless platforms
-                                    // can have very high tail latency, so this gets
-                                    // around that issue. Since this isn't an error-based retry, we
-                                    // don't increment the retry count.
-                                    for (i, task) in unfinished.iter().enumerate() {
-                                        if task.is_some() {
-                                            status_collector.add(stage_name.clone(),
-                                                i,
-                                                StatusUpdateInput::Retry((
-                                                    i, Report::new(TaskError::TailRetry),
-                                                )));
-                                            ready_to_run.push_back(i);
-                                        }
-                                    }
-                                }
-                            }
-                        }
-                        Err(e) => {
-                            if let Some(task_info) = unfinished[index].as_mut() {
-                                if e.current_context().retryable() && task_info.try_num <= self.scheduler.max_retries {
-                                    status_collector.add(
-                                        stage_name.clone(),
-                                        index,
-                                        StatusUpdateInput::Retry((task_info.try_num, e)),
-                                    );
-                                    task_info.try_num += 1;
-                                    ready_to_run.push_back(index);
-                                } else {
-                                    status_collector.add(
-                                        stage_name.clone(),
-                                        index,
-                                        StatusUpdateInput::Failed(e),
-                                    );
-                                    failed = true;
-                                }
-                            }
-                        }
-                    }
-
-
-                }
-            };
         }
+
+        syncs.job_semaphore.close();
 
         if failed {
             Err(TaskError::Failed(false)).into_report()
@@ -297,4 +255,96 @@ impl<TASKTYPE: TaskType, SPAWNER: Spawner> JobManager<TASKTYPE, SPAWNER> {
             Ok(output_list)
         }
     }
+}
+
+impl<TASKTYPE: TaskType, SPAWNER: Spawner> Drop for JobManager<TASKTYPE, SPAWNER> {
+    fn drop(&mut self) {
+        if let Some(sem) = self.global_semaphore.as_ref() {
+            sem.close();
+        }
+    }
+}
+
+struct TaskOutput {
+    output_location: String,
+}
+
+struct TaskPayload<SPAWNER: Spawner> {
+    input: Vec<u8>,
+    stage_name: String,
+    spawn_name: Cow<'static, str>,
+    local_id: String,
+    try_num: usize,
+    status_collector: StatusCollector,
+    spawner: Arc<SPAWNER>,
+}
+
+struct TaskSyncs {
+    results_tx: flume::Sender<(usize, Result<TaskOutput, Report<TaskError>>)>,
+    global_semaphore: Option<Arc<Semaphore>>,
+    job_semaphore: Semaphore,
+}
+
+async fn run_one_task<SPAWNER: Spawner>(
+    task_index: usize,
+    syncs: Arc<TaskSyncs>,
+    payload: TaskPayload<SPAWNER>,
+) {
+    let TaskSyncs {
+        results_tx,
+        global_semaphore,
+        job_semaphore,
+    } = syncs.as_ref();
+
+    let job_acquired = job_semaphore.acquire().await;
+    if job_acquired.is_err() {
+        // The semaphore was closed which means that the whole job has already exited before we could run.
+        return;
+    }
+
+    let global_acquired = match global_semaphore.as_ref() {
+        Some(semaphore) => semaphore.acquire().await.map(Some),
+        None => Ok(None),
+    };
+    if global_acquired.is_err() {
+        // The entire job system is shutting down.
+        return;
+    }
+
+    let result = run_one_task_internal(task_index, payload).await;
+    results_tx.send((task_index, result)).ok();
+}
+
+async fn run_one_task_internal<SPAWNER: Spawner>(
+    task_index: usize,
+    payload: TaskPayload<SPAWNER>,
+) -> Result<TaskOutput, Report<TaskError>> {
+    let TaskPayload {
+        input,
+        stage_name,
+        spawn_name,
+        local_id,
+        try_num,
+        status_collector,
+        spawner,
+    } = payload;
+
+    let mut task = spawner.spawn(local_id, spawn_name, input).await?;
+    let runtime_id = task.runtime_id().await?;
+    status_collector.add(
+        stage_name,
+        task_index,
+        StatusUpdateInput::Spawned(runtime_id.clone()),
+    );
+
+    task.wait()
+        .await
+        .attach_printable_lazy(|| format!("Job {task_index} try {try_num}"))
+        .attach_printable_lazy(|| format!("Runtime ID {runtime_id}"))?;
+
+    let output = TaskOutput {
+        output_location: task.output_location(),
+    };
+
+    Ok(output)
 }
