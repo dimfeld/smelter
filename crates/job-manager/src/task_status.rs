@@ -36,7 +36,7 @@ impl From<StatusUpdateInput> for StatusUpdateData {
 
 #[derive(Debug, Clone)]
 pub struct StatusUpdateItem {
-    stage: String,
+    stage: usize,
     task_index: usize,
     timestamp: time::OffsetDateTime,
     data: StatusUpdateData,
@@ -45,6 +45,7 @@ pub struct StatusUpdateItem {
 pub enum StatusUpdateOp {
     Item(StatusUpdateItem),
     ReadFrom((tokio::sync::oneshot::Sender<Vec<StatusUpdateItem>>, usize)),
+    Take(tokio::sync::oneshot::Sender<Vec<StatusUpdateItem>>),
 }
 
 #[derive(Clone)]
@@ -58,7 +59,8 @@ impl StatusCollector {
         let collector = StatusCollector { tx };
 
         tokio::task::spawn(async move {
-            let mut items = Vec::with_capacity(estimated_num_tasks * 5 / 2);
+            let mut next_vec_size = estimated_num_tasks * 5 / 2;
+            let mut items = Vec::with_capacity(next_vec_size);
             while let Ok(op) = rx.recv_async().await {
                 match op {
                     StatusUpdateOp::Item(item) => {
@@ -68,6 +70,12 @@ impl StatusCollector {
                         let start = start.min(items.len());
                         tx.send(items[start..].to_vec()).ok();
                     }
+                    StatusUpdateOp::Take(tx) => {
+                        next_vec_size = std::cmp::max(16, next_vec_size - items.len());
+                        let items =
+                            std::mem::replace(&mut items, Vec::with_capacity(next_vec_size));
+                        tx.send(items).ok();
+                    }
                 }
             }
         });
@@ -75,7 +83,7 @@ impl StatusCollector {
         collector
     }
 
-    pub fn add(&self, stage: String, task_index: usize, data: impl Into<StatusUpdateData>) {
+    pub fn add(&self, stage: usize, task_index: usize, data: impl Into<StatusUpdateData>) {
         self.tx
             .send(StatusUpdateOp::Item(StatusUpdateItem {
                 stage,
@@ -95,6 +103,12 @@ impl StatusCollector {
     pub async fn read_from(&self, start: usize) -> Vec<StatusUpdateItem> {
         let (tx, rx) = oneshot::channel();
         self.tx.send(StatusUpdateOp::ReadFrom((tx, start))).ok();
+        rx.await.unwrap_or_default()
+    }
+
+    pub async fn take(&self) -> Vec<StatusUpdateItem> {
+        let (tx, rx) = oneshot::channel();
+        self.tx.send(StatusUpdateOp::Take(tx)).ok();
         rx.await.unwrap_or_default()
     }
 }

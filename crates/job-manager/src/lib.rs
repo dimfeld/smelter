@@ -28,37 +28,22 @@ pub trait TaskInfo: Debug {
 #[async_trait::async_trait]
 pub trait TaskType: Send + Sync {
     type TaskDef: Send;
-    type MapTaskDef: TaskInfo + serde::Serialize + Send;
-    type TopLevelReducerTaskDef: TaskInfo + serde::Serialize + Send;
-    type IntermediateReducerTaskDef: TaskInfo
-        + serde::Serialize
-        + Send
-        + From<Self::TopLevelReducerTaskDef>;
+    type SubTaskDef: TaskInfo + serde::Serialize + Send;
     type Error: std::error::Error + error_stack::Context + Send + Sync;
 
-    /// Given a single task definition, create a list of map tasks to run.
-    async fn create_map_tasks(
+    /// Given an initial task definition, create a list of subtasks to run.
+    async fn create_initial_subtasks(
         &self,
         task_def: &Self::TaskDef,
-    ) -> Result<Vec<Self::MapTaskDef>, Self::Error>;
+    ) -> Result<Vec<Self::SubTaskDef>, Self::Error>;
 
-    /// Create reducer tasks to run on the output of the map tasks.
-    async fn create_top_level_reducers(
+    /// Create reducer tasks to run on the output of a previous stage. If there is nothing left to
+    /// do, return an empty Vector.
+    async fn create_subtasks_from_result(
         &self,
         task_def: &Self::TaskDef,
-        subtasks: &[TaskDefWithOutput<Self::MapTaskDef>],
-    ) -> Result<Vec<Self::TopLevelReducerTaskDef>, Self::Error>;
-
-    /// Create reducers that that can run on the output of previous reducers. Each invocation
-    /// of this function receives the list of [IntermediateReducerTaskDef]s for the previous set of reducers.
-    /// If there are no further reducers to run, return an empty vector.
-    async fn create_intermediate_reducers(
-        &self,
-        task_def: &Self::TaskDef,
-        reducers: &[TaskDefWithOutput<Self::IntermediateReducerTaskDef>],
-    ) -> Result<Vec<Self::IntermediateReducerTaskDef>, Self::Error> {
-        Ok(Vec::new())
-    }
+        subtasks: &[TaskDefWithOutput<Self::SubTaskDef>],
+    ) -> Result<Vec<Self::SubTaskDef>, Self::Error>;
 }
 
 #[cfg(test)]

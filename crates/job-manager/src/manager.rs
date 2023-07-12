@@ -1,15 +1,19 @@
-use std::borrow::Cow;
+mod run_subtask;
+
 use std::fmt::Debug;
 use std::sync::Arc;
 
 use crate::{
     scheduler::{SchedulerBehavior, SlowTaskBehavior},
-    spawn::{SpawnedTask, Spawner, TaskError},
+    spawn::{Spawner, TaskError},
     task_status::{StatusCollector, StatusUpdateInput},
     TaskDefWithOutput, TaskInfo, TaskType,
 };
 use error_stack::{IntoReport, IntoReportCompat, Report, ResultExt};
 use tokio::sync::Semaphore;
+
+use self::run_subtask::{SubtaskPayload, SubtaskSyncs};
+
 #[derive(Debug)]
 struct TaskTrackingInfo<INPUT: Debug> {
     input: INPUT,
@@ -43,76 +47,40 @@ impl<TASKTYPE: TaskType, SPAWNER: Spawner> JobManager<TASKTYPE, SPAWNER> {
         status_collector: StatusCollector,
         task_def: TASKTYPE::TaskDef,
     ) -> Result<Vec<String>, Report<TaskError>> {
-        let map_tasks = self
+        let mut stage_tasks = self
             .task_type
-            .create_map_tasks(&task_def)
+            .create_initial_subtasks(&task_def)
             .await
             .into_report()
             .change_context(TaskError::TaskGenerationFailed)?;
 
-        let map_results = self
-            .run_tasks_stage("map".to_string(), status_collector.clone(), map_tasks)
-            .await?;
-
-        let first_reducer_tasks = self
-            .task_type
-            .create_top_level_reducers(&task_def, &map_results)
-            .await
-            .into_report()
-            .change_context(TaskError::TaskGenerationFailed)?;
-
-        if first_reducer_tasks.is_empty() {
-            return Ok(map_results
-                .into_iter()
-                .map(|task| task.output_location)
-                .collect());
-        }
-
-        let mut reducer_results = self
-            .run_tasks_stage(
-                "reducer_0".to_string(),
-                status_collector.clone(),
-                first_reducer_tasks,
-            )
-            .await?
-            .into_iter()
-            .map(|task| TaskDefWithOutput {
-                task_def: task.task_def.into(),
-                output_location: task.output_location,
-            })
-            .collect::<Vec<_>>();
-
-        let mut reducer_index = 1;
+        let mut stage_index = 0;
         loop {
-            let reducer_tasks = self
+            let stage_results = self
+                .run_tasks_stage(stage_index, status_collector.clone(), stage_tasks)
+                .await?;
+
+            stage_tasks = self
                 .task_type
-                .create_intermediate_reducers(&task_def, &reducer_results)
+                .create_subtasks_from_result(&task_def, &stage_results)
                 .await
                 .into_report()
                 .change_context(TaskError::TaskGenerationFailed)?;
-            if reducer_tasks.is_empty() {
-                break;
+
+            if stage_tasks.is_empty() {
+                return Ok(stage_results
+                    .into_iter()
+                    .map(|task| task.output_location)
+                    .collect());
             }
 
-            reducer_results = self
-                .run_tasks_stage(
-                    format!("reducer_{reducer_index}"),
-                    status_collector.clone(),
-                    reducer_tasks,
-                )
-                .await?;
-            reducer_index += 1;
+            stage_index += 1;
         }
-
-        Ok(reducer_results
-            .into_iter()
-            .map(|task| task.output_location)
-            .collect())
     }
 
     async fn run_tasks_stage<DEF: TaskInfo + Send>(
         &self,
-        stage_name: String,
+        stage_index: usize,
         status_collector: StatusCollector,
         inputs: Vec<DEF>,
     ) -> Result<Vec<TaskDefWithOutput<DEF>>, Report<TaskError>> {
@@ -136,7 +104,7 @@ impl<TASKTYPE: TaskType, SPAWNER: Spawner> JobManager<TASKTYPE, SPAWNER> {
         let (results_tx, results_rx) = flume::unbounded();
 
         let job_semaphore = Semaphore::new(max_concurrent_tasks);
-        let syncs = Arc::new(TaskSyncs {
+        let syncs = Arc::new(SubtaskSyncs {
             job_semaphore,
             global_semaphore: self.global_semaphore.clone(),
             results_tx,
@@ -152,24 +120,28 @@ impl<TASKTYPE: TaskType, SPAWNER: Spawner> JobManager<TASKTYPE, SPAWNER> {
             let input = match input {
                 Ok(p) => p,
                 Err(e) => {
-                    status_collector.add(stage_name.clone(), i, StatusUpdateInput::Failed(e));
+                    status_collector.add(stage_index, i, StatusUpdateInput::Failed(e));
                     return false;
                 }
             };
 
             let spawn_name = task.input.spawn_name();
-            let local_id = format!("{stage_name}:{i:05}:{try_num:02}", try_num = task.try_num);
-            let payload = TaskPayload {
+            let local_id = format!(
+                "{stage_index:03}:{i:05}:{try_num:02}",
+                try_num = task.try_num
+            );
+            let payload = SubtaskPayload {
                 input,
                 spawn_name,
                 local_id,
-                stage_name: stage_name.clone(),
+                stage_index,
                 try_num: task.try_num,
                 status_collector: status_collector.clone(),
                 spawner: self.spawner.clone(),
             };
 
-            tokio::task::spawn(run_one_task(i, syncs.clone(), payload));
+            // TODO Need to keep track of these tasks in case of panic.
+            tokio::task::spawn(run_subtask::run_subtask(i, syncs.clone(), payload));
 
             true
         };
@@ -207,7 +179,7 @@ impl<TASKTYPE: TaskType, SPAWNER: Spawner> JobManager<TASKTYPE, SPAWNER> {
                                 for (i, task) in unfinished.iter().enumerate() {
                                     if let Some(task) = task.as_ref() {
                                         status_collector.add(
-                                            stage_name.clone(),
+                                            stage_index,
                                             i,
                                             StatusUpdateInput::Retry((
                                                 i,
@@ -227,7 +199,7 @@ impl<TASKTYPE: TaskType, SPAWNER: Spawner> JobManager<TASKTYPE, SPAWNER> {
                                 && task_info.try_num <= self.scheduler.max_retries
                             {
                                 status_collector.add(
-                                    stage_name.clone(),
+                                    stage_index,
                                     task_index,
                                     StatusUpdateInput::Retry((task_info.try_num, e)),
                                 );
@@ -235,7 +207,7 @@ impl<TASKTYPE: TaskType, SPAWNER: Spawner> JobManager<TASKTYPE, SPAWNER> {
                                 spawn_task(task_index, task_info);
                             } else {
                                 status_collector.add(
-                                    stage_name.clone(),
+                                    stage_index,
                                     task_index,
                                     StatusUpdateInput::Failed(e),
                                 );
@@ -263,88 +235,4 @@ impl<TASKTYPE: TaskType, SPAWNER: Spawner> Drop for JobManager<TASKTYPE, SPAWNER
             sem.close();
         }
     }
-}
-
-struct TaskOutput {
-    output_location: String,
-}
-
-struct TaskPayload<SPAWNER: Spawner> {
-    input: Vec<u8>,
-    stage_name: String,
-    spawn_name: Cow<'static, str>,
-    local_id: String,
-    try_num: usize,
-    status_collector: StatusCollector,
-    spawner: Arc<SPAWNER>,
-}
-
-struct TaskSyncs {
-    results_tx: flume::Sender<(usize, Result<TaskOutput, Report<TaskError>>)>,
-    global_semaphore: Option<Arc<Semaphore>>,
-    job_semaphore: Semaphore,
-}
-
-async fn run_one_task<SPAWNER: Spawner>(
-    task_index: usize,
-    syncs: Arc<TaskSyncs>,
-    payload: TaskPayload<SPAWNER>,
-) {
-    let TaskSyncs {
-        results_tx,
-        global_semaphore,
-        job_semaphore,
-    } = syncs.as_ref();
-
-    let job_acquired = job_semaphore.acquire().await;
-    if job_acquired.is_err() {
-        // The semaphore was closed which means that the whole job has already exited before we could run.
-        return;
-    }
-
-    let global_acquired = match global_semaphore.as_ref() {
-        Some(semaphore) => semaphore.acquire().await.map(Some),
-        None => Ok(None),
-    };
-    if global_acquired.is_err() {
-        // The entire job system is shutting down.
-        return;
-    }
-
-    let result = run_one_task_internal(task_index, payload).await;
-    results_tx.send((task_index, result)).ok();
-}
-
-async fn run_one_task_internal<SPAWNER: Spawner>(
-    task_index: usize,
-    payload: TaskPayload<SPAWNER>,
-) -> Result<TaskOutput, Report<TaskError>> {
-    let TaskPayload {
-        input,
-        stage_name,
-        spawn_name,
-        local_id,
-        try_num,
-        status_collector,
-        spawner,
-    } = payload;
-
-    let mut task = spawner.spawn(local_id, spawn_name, input).await?;
-    let runtime_id = task.runtime_id().await?;
-    status_collector.add(
-        stage_name,
-        task_index,
-        StatusUpdateInput::Spawned(runtime_id.clone()),
-    );
-
-    task.wait()
-        .await
-        .attach_printable_lazy(|| format!("Job {task_index} try {try_num}"))
-        .attach_printable_lazy(|| format!("Runtime ID {runtime_id}"))?;
-
-    let output = TaskOutput {
-        output_location: task.output_location(),
-    };
-
-    Ok(output)
 }

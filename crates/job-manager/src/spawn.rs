@@ -1,3 +1,4 @@
+pub mod fail_wrapper;
 #[cfg(feature = "inprocess")]
 pub mod inprocess;
 pub mod local;

@@ -9,10 +9,10 @@ use tokio::{sync::oneshot, task::JoinHandle};
 
 use super::{SpawnedTask, Spawner, TaskError};
 
-pub struct InProcessTaskInfo {
+pub struct InProcessTaskInfo<'a> {
     pub task_name: String,
     pub local_id: String,
-    pub input_value: Vec<u8>,
+    pub input_value: &'a [u8],
 }
 
 pub struct InProcessSpawner<F, FUNC, RESULT>
@@ -65,7 +65,7 @@ where
                 let result = (task_fn)(InProcessTaskInfo {
                     task_name: task_name.to_string(),
                     local_id: local_id.to_string(),
-                    input_value: input,
+                    input_value: &input,
                 })
                 .await?;
 
