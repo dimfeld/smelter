@@ -101,22 +101,6 @@ impl SpawnedTask for LocalSpawnedTask {
             .change_context(TaskError::Failed(false))
     }
 
-    async fn check_finished(&mut self) -> Result<bool, Report<TaskError>> {
-        let result = self
-            .child_process
-            .try_wait()
-            .into_report()
-            .change_context(TaskError::Failed(false))?;
-
-        match result {
-            Some(status) => {
-                Self::handle_exit_status(status)?;
-                Ok(true)
-            }
-            None => Ok(false),
-        }
-    }
-
     async fn wait(&mut self) -> Result<(), Report<TaskError>> {
         let result = self
             .child_process

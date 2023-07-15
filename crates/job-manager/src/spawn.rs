@@ -60,8 +60,6 @@ impl TaskError {
 pub trait SpawnedTask: Send + Sync + 'static {
     /// The internal ID of the spawned task in the runtime.
     async fn runtime_id(&self) -> Result<String, TaskError>;
-    /// Check if a task is finished yet.
-    async fn check_finished(&mut self) -> Result<bool, Report<TaskError>>;
     /// Return a future that resolves when a task finishes.
     async fn wait(&mut self) -> Result<(), Report<TaskError>>;
     /// Attempt to kill a task before it finishes.

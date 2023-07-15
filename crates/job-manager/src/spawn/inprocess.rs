@@ -98,10 +98,6 @@ impl SpawnedTask for InProcessSpawnedTask {
         Ok(())
     }
 
-    async fn check_finished(&mut self) -> Result<bool, Report<TaskError>> {
-        Ok(self.task.as_ref().map(|m| m.is_finished()).unwrap_or(true))
-    }
-
     async fn wait(&mut self) -> Result<(), Report<TaskError>> {
         let Some(task) = self.task.take() else {
             return Ok(());
