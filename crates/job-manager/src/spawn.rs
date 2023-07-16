@@ -24,7 +24,7 @@ pub trait Spawner: Send + Sync + 'static {
     ) -> Result<Self::SpawnedTask, Report<TaskError>>;
 }
 
-#[derive(Clone, Error, Debug)]
+#[derive(Clone, Error, Debug, PartialEq, Eq)]
 pub enum TaskError {
     #[error("Failed to start")]
     DidNotStart(bool),
