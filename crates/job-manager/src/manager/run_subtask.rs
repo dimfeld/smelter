@@ -4,7 +4,7 @@ use crate::{
     spawn::{SpawnedTask, Spawner, TaskError},
     task_status::{StatusCollector, StatusUpdateInput},
 };
-use error_stack::{Report, ResultExt};
+use error_stack::{IntoReport, Report, ResultExt};
 use tokio::sync::Semaphore;
 
 pub(super) type SubtaskResult = Result<SubtaskOutput, Report<TaskError>>;
@@ -27,6 +27,7 @@ pub(super) struct SubtaskPayload<SPAWNER: Spawner> {
 pub(super) struct SubtaskSyncs {
     pub global_semaphore: Option<Arc<Semaphore>>,
     pub job_semaphore: Semaphore,
+    pub cancel: tokio::sync::watch::Receiver<()>,
 }
 
 pub(super) async fn run_subtask<SPAWNER: Spawner>(
@@ -37,6 +38,7 @@ pub(super) async fn run_subtask<SPAWNER: Spawner>(
     let SubtaskSyncs {
         global_semaphore,
         job_semaphore,
+        cancel,
     } = syncs.as_ref();
 
     let job_acquired = job_semaphore.acquire().await;
@@ -54,11 +56,12 @@ pub(super) async fn run_subtask<SPAWNER: Spawner>(
         return None;
     }
 
-    let result = run_subtask_internal(task_index, payload).await;
+    let result = run_subtask_internal(cancel.clone(), task_index, payload).await;
     Some(result)
 }
 
 async fn run_subtask_internal<SPAWNER: Spawner>(
+    mut cancel: tokio::sync::watch::Receiver<()>,
     task_index: usize,
     payload: SubtaskPayload<SPAWNER>,
 ) -> SubtaskResult {
@@ -80,10 +83,19 @@ async fn run_subtask_internal<SPAWNER: Spawner>(
         StatusUpdateInput::Spawned(runtime_id.clone()),
     );
 
-    task.wait()
-        .await
-        .attach_printable_lazy(|| format!("Job {task_index} try {try_num}"))
-        .attach_printable_lazy(|| format!("Runtime ID {runtime_id}"))?;
+    tokio::select! {
+        res = task.wait() => {
+            res
+                .attach_printable_lazy(|| format!("Job {task_index} try {try_num}"))
+                .attach_printable_lazy(|| format!("Runtime ID {runtime_id}"))?;
+
+        }
+
+        _ = cancel.changed() => {
+            task.kill().await.ok();
+            return Err(TaskError::Cancelled).into_report();
+        }
+    };
 
     let output = SubtaskOutput {
         output_location: task.output_location(),
@@ -96,18 +108,26 @@ async fn run_subtask_internal<SPAWNER: Spawner>(
 mod test {
     use std::time::Duration;
 
+    use tokio::time::timeout;
+
     use super::*;
     use crate::spawn::{fail_wrapper::FailingSpawner, inprocess::InProcessSpawner, TaskError};
 
-    fn create_task_input() -> (StatusCollector, Arc<SubtaskSyncs>) {
+    fn create_task_input() -> (
+        StatusCollector,
+        tokio::sync::watch::Sender<()>,
+        Arc<SubtaskSyncs>,
+    ) {
+        let (cancel_tx, cancel_rx) = tokio::sync::watch::channel(());
         let syncs = Arc::new(SubtaskSyncs {
             job_semaphore: Semaphore::new(1),
             global_semaphore: None,
+            cancel: cancel_rx,
         });
 
         let status_collector = StatusCollector::new(1);
 
-        (status_collector, syncs)
+        (status_collector, cancel_tx, syncs)
     }
 
     #[tokio::test]
@@ -116,7 +136,7 @@ mod test {
             Ok(format!("result {}", info.local_id))
         }));
 
-        let (status_collector, syncs) = create_task_input();
+        let (status_collector, _cancel_tx, syncs) = create_task_input();
 
         let payload = SubtaskPayload {
             input: Vec::new(),
@@ -140,12 +160,48 @@ mod test {
     }
 
     #[tokio::test]
+    async fn cancel_task() {
+        let spawner = Arc::new(InProcessSpawner::new(|info| async move {
+            futures::future::pending::<()>().await;
+            Ok::<_, TaskError>(format!("result {}", info.local_id))
+        }));
+
+        let (status_collector, cancel_tx, syncs) = create_task_input();
+
+        let payload = SubtaskPayload {
+            input: Vec::new(),
+            stage_index: 0,
+            spawn_name: Cow::Borrowed("test"),
+            local_id: "the_id".to_string(),
+            try_num: 0,
+            status_collector: status_collector.clone(),
+            spawner,
+        };
+
+        let task = tokio::task::spawn(run_subtask(0, syncs, payload));
+
+        drop(cancel_tx);
+
+        let result = timeout(Duration::from_secs(1), task)
+            .await
+            .expect("task should finish")
+            .expect("task should not panic")
+            .expect("task result should return Some")
+            .expect_err("task result should be Err");
+        assert_eq!(
+            result.current_context(),
+            &TaskError::Cancelled,
+            "task result should be Cancelled"
+        );
+    }
+
+    #[tokio::test]
     async fn semaphore_waits() {
         let spawner = Arc::new(InProcessSpawner::new(|info| async move {
             Ok(format!("result {}", info.local_id))
         }));
 
-        let (status_collector, _) = create_task_input();
+        let (status_collector, _cancel_tx, syncs) = create_task_input();
 
         let global_semaphore = Arc::new(Semaphore::new(1));
         let job_semaphore = Semaphore::new(1);
@@ -153,6 +209,7 @@ mod test {
         let syncs = Arc::new(SubtaskSyncs {
             global_semaphore: Some(global_semaphore),
             job_semaphore,
+            cancel: syncs.cancel.clone(),
         });
 
         let global_lock = syncs
@@ -219,7 +276,7 @@ mod test {
             Ok(format!("result {}", info.local_id))
         }));
 
-        let (status_collector, _) = create_task_input();
+        let (status_collector, _cancel_tx, syncs) = create_task_input();
 
         let global_semaphore = Arc::new(Semaphore::new(1));
         let job_semaphore = Semaphore::new(1);
@@ -227,6 +284,7 @@ mod test {
         let syncs = Arc::new(SubtaskSyncs {
             global_semaphore: Some(global_semaphore),
             job_semaphore,
+            cancel: syncs.cancel.clone(),
         });
 
         let _global_lock = syncs
@@ -266,7 +324,7 @@ mod test {
             Ok(format!("result {}", info.local_id))
         }));
 
-        let (status_collector, _) = create_task_input();
+        let (status_collector, _cancel_tx, syncs) = create_task_input();
 
         let global_semaphore = Arc::new(Semaphore::new(1));
         let job_semaphore = Semaphore::new(1);
@@ -274,6 +332,7 @@ mod test {
         let syncs = Arc::new(SubtaskSyncs {
             global_semaphore: Some(global_semaphore),
             job_semaphore,
+            cancel: syncs.cancel.clone(),
         });
 
         let _job_lock = syncs
@@ -310,7 +369,7 @@ mod test {
         let spawner = Arc::new(InProcessSpawner::new(|_| async move {
             Err::<(), _>(TaskError::Failed(false))
         }));
-        let (status_collector, syncs) = create_task_input();
+        let (status_collector, _cancel_tx, syncs) = create_task_input();
 
         let payload = SubtaskPayload {
             input: Vec::new(),
@@ -336,7 +395,7 @@ mod test {
             |_| Err(TaskError::DidNotStart(true)),
         ));
 
-        let (status_collector, syncs) = create_task_input();
+        let (status_collector, _cancel_tx, syncs) = create_task_input();
 
         let payload = SubtaskPayload {
             input: Vec::new(),

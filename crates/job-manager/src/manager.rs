@@ -101,18 +101,23 @@ impl<TASKTYPE: TaskType, SPAWNER: Spawner> JobManager<TASKTYPE, SPAWNER> {
             SlowTaskBehavior::RerunLastN(n) => std::cmp::min(n, total_num_tasks / 2),
         };
 
+        // We never transmit anything on cancel_tx, but let it drop at the end of the function to
+        // cancel any tasks still running.
+        let (_cancel_tx, cancel_rx) = tokio::sync::watch::channel(());
         let mut failed = false;
 
         let job_semaphore = Semaphore::new(max_concurrent_tasks);
         let syncs = Arc::new(SubtaskSyncs {
             job_semaphore,
             global_semaphore: self.global_semaphore.clone(),
+            cancel: cancel_rx,
         });
 
         let mut running_tasks = FuturesUnordered::new();
         let spawn_task = |i: usize,
                           task: &TaskTrackingInfo<DEF>,
-                          futures: &mut FuturesUnordered<_>| {
+                          futures: &mut FuturesUnordered<_>,
+                          failed: &mut bool| {
             let input = task
                 .input
                 .serialize_input()
@@ -123,7 +128,8 @@ impl<TASKTYPE: TaskType, SPAWNER: Spawner> JobManager<TASKTYPE, SPAWNER> {
                 Ok(p) => p,
                 Err(e) => {
                     status_collector.add(stage_index, i, StatusUpdateInput::Failed(e));
-                    return false;
+                    *failed = true;
+                    return;
                 }
             };
 
@@ -145,14 +151,12 @@ impl<TASKTYPE: TaskType, SPAWNER: Spawner> JobManager<TASKTYPE, SPAWNER> {
             let new_task = tokio::task::spawn(run_subtask::run_subtask(i, syncs.clone(), payload))
                 .map(move |join_handle| (i, join_handle));
             futures.push(new_task);
-            true
         };
 
         for (i, task) in unfinished.iter_mut().enumerate() {
             let task = task.as_mut().expect("task was None right away");
-            let succeeded = spawn_task(i, task, &mut running_tasks);
-            if !succeeded {
-                failed = true;
+            spawn_task(i, task, &mut running_tasks, &mut failed);
+            if failed {
                 break;
             }
         }
@@ -162,9 +166,9 @@ impl<TASKTYPE: TaskType, SPAWNER: Spawner> JobManager<TASKTYPE, SPAWNER> {
         while !failed && output_list.len() < total_num_tasks {
             while let Some((task_index, result)) = running_tasks.next().await {
                 match result {
-                    Ok(None) => {
-                        // The semaphore closed so the task did not run.
-                    }
+                    // The semaphore closed so the task did not run. This means that the whole
+                    // system is shutting down, so don't worry about it here.
+                    Ok(None) => {}
                     Ok(Some(Ok(output))) => {
                         if let Some(task_info) = unfinished[task_index].take() {
                             output_list.push(TaskDefWithOutput {
@@ -192,7 +196,7 @@ impl<TASKTYPE: TaskType, SPAWNER: Spawner> JobManager<TASKTYPE, SPAWNER> {
                                             )),
                                         );
 
-                                        spawn_task(i, task, &mut running_tasks);
+                                        spawn_task(i, task, &mut running_tasks, &mut failed);
                                     }
                                 }
                             }
@@ -210,7 +214,7 @@ impl<TASKTYPE: TaskType, SPAWNER: Spawner> JobManager<TASKTYPE, SPAWNER> {
                                     StatusUpdateInput::Retry((task_info.try_num, e)),
                                 );
                                 task_info.try_num += 1;
-                                spawn_task(task_index, task_info, &mut running_tasks);
+                                spawn_task(task_index, task_info, &mut running_tasks, &mut failed);
                             } else {
                                 status_collector.add(
                                     stage_index,
@@ -233,7 +237,7 @@ impl<TASKTYPE: TaskType, SPAWNER: Spawner> JobManager<TASKTYPE, SPAWNER> {
                                     StatusUpdateInput::Retry((task_info.try_num, e)),
                                 );
                                 task_info.try_num += 1;
-                                spawn_task(task_index, task_info, &mut running_tasks);
+                                spawn_task(task_index, task_info, &mut running_tasks, &mut failed);
                             } else {
                                 status_collector.add(
                                     stage_index,
@@ -244,6 +248,16 @@ impl<TASKTYPE: TaskType, SPAWNER: Spawner> JobManager<TASKTYPE, SPAWNER> {
                             }
                         }
                     }
+                }
+
+                if self
+                    .global_semaphore
+                    .as_ref()
+                    .map(|s| s.is_closed())
+                    .unwrap_or(false)
+                {
+                    // The system is shutting down.
+                    break;
                 }
             }
         }
