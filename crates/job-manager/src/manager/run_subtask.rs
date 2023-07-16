@@ -7,8 +7,7 @@ use crate::{
 use error_stack::{Report, ResultExt};
 use tokio::sync::Semaphore;
 
-pub(super) type SubtaskResult = (usize, SubtaskInternalResult);
-pub(super) type SubtaskInternalResult = Result<SubtaskOutput, Report<TaskError>>;
+pub(super) type SubtaskResult = Result<SubtaskOutput, Report<TaskError>>;
 
 #[derive(Debug)]
 pub struct SubtaskOutput {
@@ -26,7 +25,6 @@ pub(super) struct SubtaskPayload<SPAWNER: Spawner> {
 }
 
 pub(super) struct SubtaskSyncs {
-    pub results_tx: flume::Sender<SubtaskResult>,
     pub global_semaphore: Option<Arc<Semaphore>>,
     pub job_semaphore: Semaphore,
 }
@@ -35,9 +33,8 @@ pub(super) async fn run_subtask<SPAWNER: Spawner>(
     task_index: usize,
     syncs: Arc<SubtaskSyncs>,
     payload: SubtaskPayload<SPAWNER>,
-) {
+) -> Option<SubtaskResult> {
     let SubtaskSyncs {
-        results_tx,
         global_semaphore,
         job_semaphore,
     } = syncs.as_ref();
@@ -45,7 +42,7 @@ pub(super) async fn run_subtask<SPAWNER: Spawner>(
     let job_acquired = job_semaphore.acquire().await;
     if job_acquired.is_err() {
         // The semaphore was closed which means that the whole job has already exited before we could run.
-        return;
+        return None;
     }
 
     let global_acquired = match global_semaphore.as_ref() {
@@ -54,17 +51,17 @@ pub(super) async fn run_subtask<SPAWNER: Spawner>(
     };
     if global_acquired.is_err() {
         // The entire job system is shutting down.
-        return;
+        return None;
     }
 
     let result = run_subtask_internal(task_index, payload).await;
-    results_tx.send((task_index, result)).ok();
+    Some(result)
 }
 
 async fn run_subtask_internal<SPAWNER: Spawner>(
     task_index: usize,
     payload: SubtaskPayload<SPAWNER>,
-) -> SubtaskInternalResult {
+) -> SubtaskResult {
     let SubtaskPayload {
         input,
         stage_index,
@@ -100,22 +97,15 @@ mod test {
     use super::*;
     use crate::spawn::{fail_wrapper::FailingSpawner, inprocess::InProcessSpawner, TaskError};
 
-    fn create_task_input() -> (
-        flume::Receiver<SubtaskResult>,
-        StatusCollector,
-        Arc<SubtaskSyncs>,
-    ) {
-        let (results_tx, results_rx) = flume::unbounded();
-
+    fn create_task_input() -> (StatusCollector, Arc<SubtaskSyncs>) {
         let syncs = Arc::new(SubtaskSyncs {
             job_semaphore: Semaphore::new(1),
-            results_tx,
             global_semaphore: None,
         });
 
         let status_collector = StatusCollector::new(1);
 
-        (results_rx, status_collector, syncs)
+        (status_collector, syncs)
     }
 
     #[tokio::test]
@@ -124,7 +114,7 @@ mod test {
             Ok(format!("result {}", info.local_id))
         }));
 
-        let (results_rx, status_collector, syncs) = create_task_input();
+        let (status_collector, syncs) = create_task_input();
 
         let payload = SubtaskPayload {
             input: Vec::new(),
@@ -138,11 +128,10 @@ mod test {
 
         let task = tokio::task::spawn(run_subtask(0, syncs, payload));
 
-        task.await.expect("task should finish");
-        let (task_index, result) = results_rx.recv_async().await.unwrap();
-        assert_eq!(task_index, 0);
-
-        let result = result.expect("task result should be Ok");
+        let result = task.await.expect("task should finish");
+        let result = result
+            .expect("task result should return Some")
+            .expect("task result should be Ok");
         assert_eq!(
             result.output_location,
             "test_the_id".to_string(),

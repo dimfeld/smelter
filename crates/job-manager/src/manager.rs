@@ -10,6 +10,7 @@ use crate::{
     TaskDefWithOutput, TaskInfo, TaskType,
 };
 use error_stack::{IntoReport, IntoReportCompat, Report, ResultExt};
+use futures::{stream::FuturesUnordered, FutureExt, StreamExt};
 use tokio::sync::Semaphore;
 
 use self::run_subtask::{SubtaskPayload, SubtaskSyncs};
@@ -101,16 +102,17 @@ impl<TASKTYPE: TaskType, SPAWNER: Spawner> JobManager<TASKTYPE, SPAWNER> {
         };
 
         let mut failed = false;
-        let (results_tx, results_rx) = flume::unbounded();
 
         let job_semaphore = Semaphore::new(max_concurrent_tasks);
         let syncs = Arc::new(SubtaskSyncs {
             job_semaphore,
             global_semaphore: self.global_semaphore.clone(),
-            results_tx,
         });
 
-        let spawn_task = |i: usize, task: &TaskTrackingInfo<DEF>| {
+        let mut running_tasks = FuturesUnordered::new();
+        let spawn_task = |i: usize,
+                          task: &TaskTrackingInfo<DEF>,
+                          futures: &mut FuturesUnordered<_>| {
             let input = task
                 .input
                 .serialize_input()
@@ -140,15 +142,15 @@ impl<TASKTYPE: TaskType, SPAWNER: Spawner> JobManager<TASKTYPE, SPAWNER> {
                 spawner: self.spawner.clone(),
             };
 
-            // TODO Need to keep track of these tasks in case of panic.
-            tokio::task::spawn(run_subtask::run_subtask(i, syncs.clone(), payload));
-
+            let new_task = tokio::task::spawn(run_subtask::run_subtask(i, syncs.clone(), payload))
+                .map(move |join_handle| (i, join_handle));
+            futures.push(new_task);
             true
         };
 
         for (i, task) in unfinished.iter_mut().enumerate() {
             let task = task.as_mut().expect("task was None right away");
-            let succeeded = spawn_task(i, task);
+            let succeeded = spawn_task(i, task, &mut running_tasks);
             if !succeeded {
                 failed = true;
                 break;
@@ -158,9 +160,12 @@ impl<TASKTYPE: TaskType, SPAWNER: Spawner> JobManager<TASKTYPE, SPAWNER> {
         let mut performed_tail_retry = false;
 
         while !failed && output_list.len() < total_num_tasks {
-            if let Ok((task_index, result)) = results_rx.recv_async().await {
+            while let Some((task_index, result)) = running_tasks.next().await {
                 match result {
-                    Ok(output) => {
+                    Ok(None) => {
+                        // The semaphore closed so the task did not run.
+                    }
+                    Ok(Some(Ok(output))) => {
                         if let Some(task_info) = unfinished[task_index].take() {
                             output_list.push(TaskDefWithOutput {
                                 task_def: task_info.input,
@@ -187,13 +192,14 @@ impl<TASKTYPE: TaskType, SPAWNER: Spawner> JobManager<TASKTYPE, SPAWNER> {
                                             )),
                                         );
 
-                                        spawn_task(i, task);
+                                        spawn_task(i, task, &mut running_tasks);
                                     }
                                 }
                             }
                         }
                     }
-                    Err(e) => {
+                    // Task finished with an error.
+                    Ok(Some(Err(e))) => {
                         if let Some(task_info) = unfinished[task_index].as_mut() {
                             if e.current_context().retryable()
                                 && task_info.try_num <= self.scheduler.max_retries
@@ -204,7 +210,30 @@ impl<TASKTYPE: TaskType, SPAWNER: Spawner> JobManager<TASKTYPE, SPAWNER> {
                                     StatusUpdateInput::Retry((task_info.try_num, e)),
                                 );
                                 task_info.try_num += 1;
-                                spawn_task(task_index, task_info);
+                                spawn_task(task_index, task_info, &mut running_tasks);
+                            } else {
+                                status_collector.add(
+                                    stage_index,
+                                    task_index,
+                                    StatusUpdateInput::Failed(e),
+                                );
+                                failed = true;
+                            }
+                        }
+                    }
+                    // Task panicked. We can't really decipher the error so always consider it
+                    // retryable.
+                    Err(e) => {
+                        if let Some(task_info) = unfinished[task_index].as_mut() {
+                            let e = Report::new(e).change_context(TaskError::Failed(true));
+                            if task_info.try_num <= self.scheduler.max_retries {
+                                status_collector.add(
+                                    stage_index,
+                                    task_index,
+                                    StatusUpdateInput::Retry((task_info.try_num, e)),
+                                );
+                                task_info.try_num += 1;
+                                spawn_task(task_index, task_info, &mut running_tasks);
                             } else {
                                 status_collector.add(
                                     stage_index,
