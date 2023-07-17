@@ -28,7 +28,7 @@ pub trait TaskInfo: Debug {
 #[async_trait::async_trait]
 pub trait TaskType: Send + Sync {
     type TaskDef: Send;
-    type SubTaskDef: TaskInfo + serde::Serialize + Send;
+    type SubTaskDef: TaskInfo + Send;
     type Error: std::error::Error + error_stack::Context + Send + Sync;
 
     /// Given an initial task definition, create a list of subtasks to run.
@@ -42,6 +42,7 @@ pub trait TaskType: Send + Sync {
     async fn create_subtasks_from_result(
         &self,
         task_def: &Self::TaskDef,
+        stage_number: usize,
         subtasks: &[TaskDefWithOutput<Self::SubTaskDef>],
     ) -> Result<Vec<Self::SubTaskDef>, Self::Error>;
 }

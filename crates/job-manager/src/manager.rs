@@ -1,4 +1,6 @@
 mod run_subtask;
+#[cfg(test)]
+mod tests;
 
 use std::fmt::Debug;
 use std::sync::Arc;
@@ -63,7 +65,7 @@ impl<TASKTYPE: TaskType, SPAWNER: Spawner> JobManager<TASKTYPE, SPAWNER> {
 
             stage_tasks = self
                 .task_type
-                .create_subtasks_from_result(&task_def, &stage_results)
+                .create_subtasks_from_result(&task_def, stage_index, &stage_results)
                 .await
                 .into_report()
                 .change_context(TaskError::TaskGenerationFailed)?;
@@ -268,14 +270,6 @@ impl<TASKTYPE: TaskType, SPAWNER: Spawner> JobManager<TASKTYPE, SPAWNER> {
             Err(TaskError::Failed(false)).into_report()
         } else {
             Ok(output_list)
-        }
-    }
-}
-
-impl<TASKTYPE: TaskType, SPAWNER: Spawner> Drop for JobManager<TASKTYPE, SPAWNER> {
-    fn drop(&mut self) {
-        if let Some(sem) = self.global_semaphore.as_ref() {
-            sem.close();
         }
     }
 }
