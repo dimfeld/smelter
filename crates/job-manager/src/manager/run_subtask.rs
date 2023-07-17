@@ -82,10 +82,12 @@ async fn run_subtask_internal<SPAWNER: Spawner>(
     tokio::select! {
         res = task.wait() => {
             res.attach_printable_lazy(|| format!("Job {task_id} Runtime ID {runtime_id}"))?;
+            status_collector.add(task_id, StatusUpdateInput::Success(task.output_location()));
         }
 
         _ = cancel.changed() => {
             task.kill().await.ok();
+            status_collector.add(task_id, StatusUpdateInput::Cancelled);
             return Err(TaskError::Cancelled).into_report();
         }
     };

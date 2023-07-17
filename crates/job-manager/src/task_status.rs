@@ -11,6 +11,7 @@ pub enum StatusUpdateData {
     // Report is not clonable so just stick it on the heap.
     Retry(Arc<Report<TaskError>>),
     Failed(Arc<Report<TaskError>>),
+    Cancelled,
     Success(String),
 }
 
@@ -20,6 +21,7 @@ pub enum StatusUpdateInput {
     Spawned(String),
     Retry(Report<TaskError>),
     Failed(Report<TaskError>),
+    Cancelled,
     Success(String),
 }
 
@@ -30,15 +32,16 @@ impl From<StatusUpdateInput> for StatusUpdateData {
             StatusUpdateInput::Retry(report) => StatusUpdateData::Retry(Arc::new(report)),
             StatusUpdateInput::Failed(report) => StatusUpdateData::Failed(Arc::new(report)),
             StatusUpdateInput::Success(s) => StatusUpdateData::Success(s),
+            StatusUpdateInput::Cancelled => StatusUpdateData::Cancelled,
         }
     }
 }
 
 #[derive(Debug, Clone)]
 pub struct StatusUpdateItem {
-    task_id: SubtaskId,
-    timestamp: time::OffsetDateTime,
-    data: StatusUpdateData,
+    pub task_id: SubtaskId,
+    pub timestamp: time::OffsetDateTime,
+    pub data: StatusUpdateData,
 }
 
 pub enum StatusUpdateOp {
@@ -58,11 +61,12 @@ impl StatusCollector {
         let collector = StatusCollector { tx };
 
         tokio::task::spawn(async move {
-            let mut next_vec_size = estimated_num_tasks * 5 / 2;
+            let mut next_vec_size = estimated_num_tasks * 3 / 2;
             let mut items = Vec::with_capacity(next_vec_size);
             while let Ok(op) = rx.recv_async().await {
                 match op {
                     StatusUpdateOp::Item(item) => {
+                        println!("item: {:?}", item);
                         items.push(item);
                     }
                     StatusUpdateOp::ReadFrom((tx, start)) => {
@@ -70,7 +74,12 @@ impl StatusCollector {
                         tx.send(items[start..].to_vec()).ok();
                     }
                     StatusUpdateOp::Take(tx) => {
-                        next_vec_size = std::cmp::max(16, next_vec_size - items.len());
+                        if items.len() > next_vec_size {
+                            next_vec_size = 16;
+                        } else {
+                            next_vec_size = std::cmp::max(16, next_vec_size - items.len());
+                        }
+
                         let items =
                             std::mem::replace(&mut items, Vec::with_capacity(next_vec_size));
                         tx.send(items).ok();

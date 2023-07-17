@@ -74,13 +74,15 @@ impl TaskType for TestTask {
 mod run_tasks_stage {
     use std::time::Duration;
 
-    use crate::{spawn::inprocess::InProcessSpawner, test_util::setup_test_tracing};
+    use crate::{
+        spawn::inprocess::InProcessSpawner, task_status::StatusUpdateData,
+        test_util::setup_test_tracing,
+    };
 
     use super::*;
 
     #[tokio::test]
     async fn normal_run() {
-        setup_test_tracing();
         let task_data = TestTask {
             num_stages: 3,
             tasks_per_stage: 5,
@@ -188,8 +190,55 @@ mod run_tasks_stage {
     async fn task_panicked() {}
 
     #[tokio::test]
-    #[ignore]
-    async fn max_concurrent_tasks() {}
+    async fn max_concurrent_tasks() {
+        let task_data = TestTask {
+            num_stages: 3,
+            tasks_per_stage: 5,
+        };
+
+        let spawner = Arc::new(InProcessSpawner::new(|info| async move {
+            Ok(format!("result {}", info.task_id))
+        }));
+
+        let manager = JobManager::new(
+            task_data,
+            spawner,
+            SchedulerBehavior {
+                max_concurrent_tasks: Some(2),
+                max_retries: 2,
+                slow_task_behavior: SlowTaskBehavior::Wait,
+            },
+            None,
+        );
+
+        let status = StatusCollector::new(10);
+
+        let result = manager
+            .run(status.clone(), TestTaskDef {})
+            .await
+            .expect("Run succeeded");
+        assert_eq!(result.len(), 5);
+
+        let mut active = 0;
+        let mut max_active = 0;
+
+        let status = status.take().await;
+        for item in status {
+            match item.data {
+                StatusUpdateData::Spawned(_) => {
+                    active += 1;
+                }
+                StatusUpdateData::Success(_) => {
+                    active -= 1;
+                }
+                o => panic!("Unexpected status: {:?}", o),
+            }
+
+            max_active = std::cmp::max(max_active, active);
+        }
+
+        assert_eq!(max_active, 2, "No more than 2 tasks running at onces");
+    }
 }
 
 mod run {
