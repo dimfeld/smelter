@@ -61,7 +61,7 @@ impl TaskType for TestTask {
         stage_number: usize,
         _subtasks: &[TaskDefWithOutput<Self::SubTaskDef>],
     ) -> Result<Vec<Self::SubTaskDef>, Self::Error> {
-        if stage_number > self.num_stages {
+        if stage_number + 1 >= self.num_stages {
             Ok(Vec::new())
         } else {
             self.create_initial_subtasks(task_def).await
@@ -77,11 +77,12 @@ mod run_tasks_stage {
     #[tokio::test]
     async fn normal_run() {
         let task_data = TestTask {
-            num_stages: 2,
+            num_stages: 3,
             tasks_per_stage: 5,
         };
 
         let spawner = Arc::new(InProcessSpawner::new(|info| async move {
+            println!("Running task {}", info.local_id);
             Ok(format!("result {}", info.local_id))
         }));
 
@@ -99,6 +100,7 @@ mod run_tasks_stage {
         let status = StatusCollector::new(10);
 
         let result = manager.run(status.clone(), TestTaskDef {}).await;
+        println!("{:?}", result);
     }
 
     #[tokio::test]

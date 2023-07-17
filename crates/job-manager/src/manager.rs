@@ -87,7 +87,10 @@ impl<TASKTYPE: TaskType, SPAWNER: Spawner> JobManager<TASKTYPE, SPAWNER> {
         status_collector: StatusCollector,
         inputs: Vec<DEF>,
     ) -> Result<Vec<TaskDefWithOutput<DEF>>, Report<TaskError>> {
-        let max_concurrent_tasks = self.scheduler.max_concurrent_tasks.unwrap_or(usize::MAX);
+        let max_concurrent_tasks = self
+            .scheduler
+            .max_concurrent_tasks
+            .unwrap_or(i32::MAX as usize);
         let total_num_tasks = inputs.len();
         let mut unfinished = inputs
             .into_iter()
