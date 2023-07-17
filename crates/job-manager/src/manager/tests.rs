@@ -113,13 +113,50 @@ async fn normal_run() {
 
 #[tokio::test]
 #[ignore]
-async fn single_stage() {}
+async fn single_stage() {
+    let task_data = TestTask {
+        num_stages: 1,
+        tasks_per_stage: 5,
+    };
+
+    let spawner = Arc::new(InProcessSpawner::new(|info| async move {
+        Ok(format!("result {}", info.task_id))
+    }));
+
+    let manager = JobManager::new(
+        task_data,
+        spawner,
+        SchedulerBehavior {
+            max_concurrent_tasks: None,
+            max_retries: 2,
+            slow_task_behavior: SlowTaskBehavior::Wait,
+        },
+        None,
+    );
+
+    let status = StatusCollector::new(10);
+
+    let result = manager
+        .run(status.clone(), TestTaskDef {})
+        .await
+        .expect("Run succeeded");
+    assert_eq!(
+        result,
+        vec![
+            "test_000-00000-00".to_string(),
+            "test_000-00001-00".to_string(),
+            "test_000-00002-00".to_string(),
+            "test_000-00003-00".to_string(),
+            "test_000-00004-00".to_string(),
+        ],
+    );
+}
 
 #[tokio::test]
 async fn tail_retry() {
     setup_test_tracing();
     let task_data = TestTask {
-        num_stages: 1,
+        num_stages: 2,
         tasks_per_stage: 5,
     };
 
@@ -155,19 +192,18 @@ async fn tail_retry() {
         .expect("Run succeeded");
     result.sort();
 
+    info!("{:?}", result);
     assert_eq!(
         result,
         vec![
-            "test_000-00000-01".to_string(),
-            "test_000-00001-00".to_string(),
-            "test_000-00002-01".to_string(),
-            "test_000-00003-00".to_string(),
-            "test_000-00004-00".to_string(),
+            "test_001-00000-01".to_string(),
+            "test_001-00001-00".to_string(),
+            "test_001-00002-01".to_string(),
+            "test_001-00003-00".to_string(),
+            "test_001-00004-00".to_string(),
         ],
         "Finished tasks should be the tail retry tasks for 0 and 2"
     );
-
-    info!("{:?}", result);
 }
 
 #[tokio::test]
