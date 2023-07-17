@@ -115,13 +115,15 @@ mod run_tasks_stage {
     async fn tail_retry() {
         setup_test_tracing();
         let task_data = TestTask {
-            num_stages: 3,
+            num_stages: 1,
             tasks_per_stage: 5,
         };
 
         let spawner = Arc::new(InProcessSpawner::new(|info| async move {
             info!("Running task {}", info.task_id);
-            let sleep_time = if info.task_id.task == 2 && info.task_id.try_num == 0 {
+            let sleep_time = if (info.task_id.task == 0 || info.task_id.task == 2)
+                && info.task_id.try_num == 0
+            {
                 10000
             } else {
                 10
@@ -144,11 +146,24 @@ mod run_tasks_stage {
 
         let status = StatusCollector::new(10);
 
-        let result = manager
+        let mut result = manager
             .run(status.clone(), TestTaskDef {})
             .await
             .expect("Run succeeded");
-        assert_eq!(result.len(), 5);
+        result.sort();
+
+        assert_eq!(
+            result,
+            vec![
+                "test_000-00000-01".to_string(),
+                "test_000-00001-00".to_string(),
+                "test_000-00002-01".to_string(),
+                "test_000-00003-00".to_string(),
+                "test_000-00004-00".to_string(),
+            ],
+            "Finished tasks should be the tail retry tasks for 0 and 2"
+        );
+
         info!("{:?}", result);
     }
 

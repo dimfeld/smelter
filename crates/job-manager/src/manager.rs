@@ -203,7 +203,7 @@ impl<TASKTYPE: TaskType, SPAWNER: Spawner> JobManager<TASKTYPE, SPAWNER> {
                             });
 
                             if !performed_tail_retry
-                                && total_num_tasks - output_list.len() < retry_all_at
+                                && total_num_tasks - output_list.len() <= retry_all_at
                             {
                                 performed_tail_retry = true;
 
