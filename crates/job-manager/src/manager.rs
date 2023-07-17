@@ -238,7 +238,7 @@ impl<TASKTYPE: TaskType, SPAWNER: Spawner> JobManager<TASKTYPE, SPAWNER> {
                             };
 
                             if e.current_context().retryable()
-                                && task_info.try_num <= self.scheduler.max_retries
+                                && task_info.try_num < self.scheduler.max_retries
                             {
                                 status_collector.add(task_id, StatusUpdateInput::Retry(e));
                                 task_info.try_num += 1;
@@ -260,7 +260,7 @@ impl<TASKTYPE: TaskType, SPAWNER: Spawner> JobManager<TASKTYPE, SPAWNER> {
                                 try_num: task_info.try_num as u16,
                             };
 
-                            if task_info.try_num <= self.scheduler.max_retries {
+                            if task_info.try_num < self.scheduler.max_retries {
                                 status_collector.add(task_id, StatusUpdateInput::Retry(e));
                                 task_info.try_num += 1;
                                 spawn_task(task_index, task_info, &mut running_tasks, &mut failed);

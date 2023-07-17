@@ -4,10 +4,11 @@ use async_trait::async_trait;
 use thiserror::Error;
 use tracing::info;
 
+use super::SubtaskId;
 use crate::{
     manager::JobManager,
     scheduler::{SchedulerBehavior, SlowTaskBehavior},
-    spawn::inprocess::InProcessSpawner,
+    spawn::{fail_wrapper::FailingSpawner, inprocess::InProcessSpawner, TaskError},
     task_status::{StatusCollector, StatusUpdateData},
     test_util::setup_test_tracing,
     TaskDefWithOutput, TaskInfo, TaskType,
@@ -18,7 +19,7 @@ struct TestTask {
     tasks_per_stage: usize,
 }
 
-#[derive(Debug)]
+#[derive(Debug, Default)]
 struct TestTaskDef {}
 
 #[derive(Debug)]
@@ -104,7 +105,7 @@ async fn normal_run() {
     let status = StatusCollector::new(10);
 
     let result = manager
-        .run(status.clone(), TestTaskDef {})
+        .run(status.clone(), TestTaskDef::default())
         .await
         .expect("Run succeeded");
     assert_eq!(result.len(), 5);
@@ -112,7 +113,6 @@ async fn normal_run() {
 }
 
 #[tokio::test]
-#[ignore]
 async fn single_stage() {
     let task_data = TestTask {
         num_stages: 1,
@@ -137,7 +137,7 @@ async fn single_stage() {
     let status = StatusCollector::new(10);
 
     let result = manager
-        .run(status.clone(), TestTaskDef {})
+        .run(status.clone(), TestTaskDef::default())
         .await
         .expect("Run succeeded");
     assert_eq!(
@@ -154,7 +154,6 @@ async fn single_stage() {
 
 #[tokio::test]
 async fn tail_retry() {
-    setup_test_tracing();
     let task_data = TestTask {
         num_stages: 2,
         tasks_per_stage: 5,
@@ -187,7 +186,7 @@ async fn tail_retry() {
     let status = StatusCollector::new(10);
 
     let mut result = manager
-        .run(status.clone(), TestTaskDef {})
+        .run(status.clone(), TestTaskDef::default())
         .await
         .expect("Run succeeded");
     result.sort();
@@ -207,24 +206,178 @@ async fn tail_retry() {
 }
 
 #[tokio::test]
-#[ignore]
-async fn retry_failures() {}
+async fn retry_failures() {
+    let task_data = TestTask {
+        num_stages: 2,
+        tasks_per_stage: 5,
+    };
+
+    let spawner = Arc::new(InProcessSpawner::new(|info| async move {
+        if (info.task_id.task == 0 || info.task_id.task == 2) && info.task_id.try_num < 2 {
+            info!("Failing task {}", info.task_id);
+            Err(TaskError::Failed(true))
+        } else {
+            info!("Working task {}", info.task_id);
+            Ok(format!("result {}", info.task_id))
+        }
+    }));
+
+    let manager = JobManager::new(
+        task_data,
+        spawner,
+        SchedulerBehavior {
+            max_concurrent_tasks: None,
+            max_retries: 2,
+            slow_task_behavior: SlowTaskBehavior::Wait,
+        },
+        None,
+    );
+
+    let status = StatusCollector::new(10);
+
+    let mut result = manager
+        .run(status.clone(), TestTaskDef::default())
+        .await
+        .expect("Run succeeded");
+    result.sort();
+
+    info!("{:?}", result);
+    assert_eq!(
+        result,
+        vec![
+            "test_001-00000-02".to_string(),
+            "test_001-00001-00".to_string(),
+            "test_001-00002-02".to_string(),
+            "test_001-00003-00".to_string(),
+            "test_001-00004-00".to_string(),
+        ],
+        "Finished tasks should be the retry tasks for 0 and 2"
+    );
+}
 
 #[tokio::test]
-#[ignore]
-async fn task_payload_serialize_failure() {}
+async fn permanent_failure_task_error() {
+    let task_data = TestTask {
+        num_stages: 2,
+        tasks_per_stage: 5,
+    };
+
+    let spawner = Arc::new(InProcessSpawner::new(|info| async move {
+        if info.task_id.task == 2 {
+            info!("Failing task {}", info.task_id);
+            Err(TaskError::Failed(false))
+        } else {
+            info!("Working task {}", info.task_id);
+            Ok(format!("result {}", info.task_id))
+        }
+    }));
+
+    let manager = JobManager::new(
+        task_data,
+        spawner,
+        SchedulerBehavior {
+            max_concurrent_tasks: None,
+            max_retries: 2,
+            slow_task_behavior: SlowTaskBehavior::Wait,
+        },
+        None,
+    );
+
+    let status = StatusCollector::new(10);
+
+    let result = manager
+        .run(status.clone(), TestTaskDef::default())
+        .await
+        .expect_err("Run failed");
+
+    info!("{:?}", result);
+    assert_eq!(
+        result.current_context(),
+        &TaskError::Failed(false),
+        "Should finish with failed error"
+    );
+
+    let status = status.take().await;
+    status
+        .iter()
+        .find(|item| {
+            item.task_id.stage == 0
+                && item.task_id.task == 2
+                && item.task_id.try_num == 0
+                && matches!(item.data, StatusUpdateData::Failed(_))
+        })
+        .expect("Should find status item for failed try");
+
+    let later_items = status
+        .iter()
+        .find(|item| item.task_id.stage == 0 && item.task_id.task == 2 && item.task_id.try_num > 0);
+    assert!(
+        later_items.is_none(),
+        "Should not have tried to run task after permanent failure"
+    );
+}
 
 #[tokio::test]
-#[ignore]
-async fn permanent_failure_task_error() {}
+async fn too_many_retries() {
+    let task_data = TestTask {
+        num_stages: 2,
+        tasks_per_stage: 5,
+    };
 
-#[tokio::test]
-#[ignore]
-async fn too_many_retries() {}
+    let spawner = Arc::new(InProcessSpawner::new(|info| async move {
+        if info.task_id.task == 2 {
+            info!("Failing task {}", info.task_id);
+            Err(TaskError::Failed(true))
+        } else {
+            info!("Working task {}", info.task_id);
+            Ok(format!("result {}", info.task_id))
+        }
+    }));
+
+    let manager = JobManager::new(
+        task_data,
+        spawner,
+        SchedulerBehavior {
+            max_concurrent_tasks: None,
+            max_retries: 2,
+            slow_task_behavior: SlowTaskBehavior::Wait,
+        },
+        None,
+    );
+
+    let status = StatusCollector::new(10);
+
+    let result = manager
+        .run(status.clone(), TestTaskDef::default())
+        .await
+        .expect_err("Run failed");
+
+    info!("{:?}", result);
+    assert_eq!(
+        result.current_context(),
+        &TaskError::Failed(false),
+        "Should finish with failed error"
+    );
+
+    let status = status.take().await;
+    status
+        .into_iter()
+        .find(|item| {
+            item.task_id.stage == 0
+                && item.task_id.task == 2
+                && item.task_id.try_num == 2
+                && matches!(item.data, StatusUpdateData::Failed(_))
+        })
+        .expect("Should find status item for failed final try");
+}
 
 #[tokio::test]
 #[ignore]
 async fn task_panicked() {}
+
+#[tokio::test]
+#[ignore]
+async fn task_payload_serialize_failure() {}
 
 #[tokio::test]
 async fn max_concurrent_tasks() {
@@ -251,7 +404,7 @@ async fn max_concurrent_tasks() {
     let status = StatusCollector::new(10);
 
     let result = manager
-        .run(status.clone(), TestTaskDef {})
+        .run(status.clone(), TestTaskDef::default())
         .await
         .expect("Run succeeded");
     assert_eq!(result.len(), 5);
