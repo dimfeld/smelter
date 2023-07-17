@@ -9,6 +9,7 @@ struct TestTask {
     tasks_per_stage: usize,
 }
 
+#[derive(Debug)]
 struct TestTaskDef {}
 
 #[derive(Debug)]
@@ -70,19 +71,22 @@ impl TaskType for TestTask {
 }
 
 mod run_tasks_stage {
-    use crate::spawn::inprocess::InProcessSpawner;
+    use std::time::Duration;
+
+    use crate::{spawn::inprocess::InProcessSpawner, test_util::setup_test_tracing};
 
     use super::*;
 
     #[tokio::test]
     async fn normal_run() {
+        setup_test_tracing();
         let task_data = TestTask {
             num_stages: 3,
             tasks_per_stage: 5,
         };
 
         let spawner = Arc::new(InProcessSpawner::new(|info| async move {
-            println!("Running task {}", info.local_id);
+            // println!("Running task {}", info.local_id);
             Ok(format!("result {}", info.local_id))
         }));
 
@@ -99,13 +103,55 @@ mod run_tasks_stage {
 
         let status = StatusCollector::new(10);
 
-        let result = manager.run(status.clone(), TestTaskDef {}).await;
-        println!("{:?}", result);
+        let result = manager
+            .run(status.clone(), TestTaskDef {})
+            .await
+            .expect("Run succeeded");
+        assert_eq!(result.len(), 5);
+        // println!("{:?}", result);
     }
 
     #[tokio::test]
-    #[ignore]
-    async fn tail_retry() {}
+    async fn tail_retry() {
+        setup_test_tracing();
+        let task_data = TestTask {
+            num_stages: 3,
+            tasks_per_stage: 5,
+        };
+
+        let spawner = Arc::new(InProcessSpawner::new(|info| async move {
+            println!("Running task {}", info.local_id);
+            let segments = info.local_id.split(':').collect::<Vec<_>>();
+            let sleep_time = if segments[1] == "00002" && segments[2] == "00" {
+                10000
+            } else {
+                10
+            };
+            tokio::time::sleep(Duration::from_millis(sleep_time)).await;
+            println!("Finished task {}", info.local_id);
+            Ok(format!("result {}", info.local_id))
+        }));
+
+        let manager = JobManager::new(
+            task_data,
+            spawner,
+            SchedulerBehavior {
+                max_concurrent_tasks: None,
+                max_retries: 2,
+                slow_task_behavior: SlowTaskBehavior::RerunLastN(2),
+            },
+            None,
+        );
+
+        let status = StatusCollector::new(10);
+
+        let result = manager
+            .run(status.clone(), TestTaskDef {})
+            .await
+            .expect("Run succeeded");
+        assert_eq!(result.len(), 5);
+        println!("{:?}", result);
+    }
 
     #[tokio::test]
     #[ignore]
@@ -125,7 +171,11 @@ mod run_tasks_stage {
 
     #[tokio::test]
     #[ignore]
-    async fn tail_retries() {}
+    async fn task_panicked() {}
+
+    #[tokio::test]
+    #[ignore]
+    async fn max_concurrent_tasks() {}
 }
 
 mod run {

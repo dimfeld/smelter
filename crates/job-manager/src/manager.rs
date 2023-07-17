@@ -14,6 +14,7 @@ use crate::{
 use error_stack::{IntoReport, IntoReportCompat, Report, ResultExt};
 use futures::{stream::FuturesUnordered, FutureExt, StreamExt};
 use tokio::sync::Semaphore;
+use tracing::{info, instrument};
 
 use self::run_subtask::{SubtaskPayload, SubtaskSyncs};
 
@@ -45,6 +46,7 @@ impl<TASKTYPE: TaskType, SPAWNER: Spawner> JobManager<TASKTYPE, SPAWNER> {
         }
     }
 
+    #[instrument(skip(self, status_collector))]
     pub async fn run(
         &self,
         status_collector: StatusCollector,
@@ -81,6 +83,7 @@ impl<TASKTYPE: TaskType, SPAWNER: Spawner> JobManager<TASKTYPE, SPAWNER> {
         }
     }
 
+    #[instrument(skip(self, status_collector, inputs), fields(num_tasks = inputs.len()))]
     async fn run_tasks_stage<DEF: TaskInfo + Send>(
         &self,
         stage_index: usize,
@@ -153,8 +156,14 @@ impl<TASKTYPE: TaskType, SPAWNER: Spawner> JobManager<TASKTYPE, SPAWNER> {
                 spawner: self.spawner.clone(),
             };
 
-            let new_task = tokio::task::spawn(run_subtask::run_subtask(i, syncs.clone(), payload))
-                .map(move |join_handle| (i, join_handle));
+            let current_span = tracing::Span::current();
+            let new_task = tokio::task::spawn(run_subtask::run_subtask(
+                current_span,
+                i,
+                syncs.clone(),
+                payload,
+            ))
+            .map(move |join_handle| (i, join_handle));
             futures.push(new_task);
         };
 
@@ -169,7 +178,7 @@ impl<TASKTYPE: TaskType, SPAWNER: Spawner> JobManager<TASKTYPE, SPAWNER> {
         let mut performed_tail_retry = false;
 
         while !failed && output_list.len() < total_num_tasks {
-            while let Some((task_index, result)) = running_tasks.next().await {
+            if let Some((task_index, result)) = running_tasks.next().await {
                 match result {
                     // The semaphore closed so the task did not run. This means that the whole
                     // system is shutting down, so don't worry about it here.
@@ -187,20 +196,19 @@ impl<TASKTYPE: TaskType, SPAWNER: Spawner> JobManager<TASKTYPE, SPAWNER> {
                                 performed_tail_retry = true;
 
                                 // Re-enqueue all unfinished tasks. Some serverless platforms
-                                // can have very high tail latency, so this gets
-                                // around that issue. Since this isn't an error-based retry, we
-                                // don't increment the retry count.
-                                for (i, task) in unfinished.iter().enumerate() {
-                                    if let Some(task) = task.as_ref() {
+                                // can have very high tail latency, so this gets around that issue.
+                                for (i, task) in unfinished.iter_mut().enumerate() {
+                                    if let Some(task) = task.as_mut() {
                                         status_collector.add(
                                             stage_index,
                                             i,
                                             StatusUpdateInput::Retry((
-                                                i,
+                                                task.try_num,
                                                 Report::new(TaskError::TailRetry),
                                             )),
                                         );
 
+                                        task.try_num += 1;
                                         spawn_task(i, task, &mut running_tasks, &mut failed);
                                     }
                                 }

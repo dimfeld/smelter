@@ -6,6 +6,7 @@ use crate::{
 };
 use error_stack::{IntoReport, Report, ResultExt};
 use tokio::sync::Semaphore;
+use tracing::{instrument, Level};
 
 pub(super) type SubtaskResult = Result<SubtaskOutput, Report<TaskError>>;
 
@@ -30,7 +31,9 @@ pub(super) struct SubtaskSyncs {
     pub cancel: tokio::sync::watch::Receiver<()>,
 }
 
+#[instrument(level=Level::DEBUG, ret, parent=&parent_span, skip(syncs, parent_span, payload), fields(stage_index = payload.stage_index, try_num=payload.try_num))]
 pub(super) async fn run_subtask<SPAWNER: Spawner>(
+    parent_span: tracing::Span,
     task_index: usize,
     syncs: Arc<SubtaskSyncs>,
     payload: SubtaskPayload<SPAWNER>,
@@ -60,6 +63,7 @@ pub(super) async fn run_subtask<SPAWNER: Spawner>(
     Some(result)
 }
 
+#[instrument(level=Level::TRACE, skip(cancel, payload), fields(stage_index = payload.stage_index, try_num=payload.try_num))]
 async fn run_subtask_internal<SPAWNER: Spawner>(
     mut cancel: tokio::sync::watch::Receiver<()>,
     task_index: usize,
@@ -148,7 +152,7 @@ mod test {
             spawner,
         };
 
-        let result = run_subtask(0, syncs, payload)
+        let result = run_subtask(tracing::Span::current(), 0, syncs, payload)
             .await
             .expect("task result should return Some")
             .expect("task result should be Ok");
@@ -178,7 +182,7 @@ mod test {
             spawner,
         };
 
-        let task = tokio::task::spawn(run_subtask(0, syncs, payload));
+        let task = tokio::task::spawn(run_subtask(tracing::Span::current(), 0, syncs, payload));
 
         drop(cancel_tx);
 
@@ -235,7 +239,12 @@ mod test {
             spawner,
         };
 
-        let task = tokio::task::spawn(run_subtask(0, syncs.clone(), payload));
+        let task = tokio::task::spawn(run_subtask(
+            tracing::Span::current(),
+            0,
+            syncs.clone(),
+            payload,
+        ));
 
         tokio::time::sleep(std::time::Duration::from_millis(10)).await;
         assert!(!task.is_finished(), "task waits for semaphores");
@@ -305,7 +314,12 @@ mod test {
             spawner,
         };
 
-        let task = tokio::task::spawn(run_subtask(0, syncs.clone(), payload));
+        let task = tokio::task::spawn(run_subtask(
+            tracing::Span::current(),
+            0,
+            syncs.clone(),
+            payload,
+        ));
         syncs.global_semaphore.as_ref().unwrap().close();
 
         let result = tokio::time::timeout(Duration::from_secs(5), task)
@@ -351,7 +365,12 @@ mod test {
             spawner,
         };
 
-        let task = tokio::task::spawn(run_subtask(0, syncs.clone(), payload));
+        let task = tokio::task::spawn(run_subtask(
+            tracing::Span::current(),
+            0,
+            syncs.clone(),
+            payload,
+        ));
         syncs.job_semaphore.close();
 
         let result = tokio::time::timeout(Duration::from_secs(5), task)
@@ -381,7 +400,7 @@ mod test {
             spawner,
         };
 
-        let err = run_subtask(0, syncs, payload)
+        let err = run_subtask(tracing::Span::current(), 0, syncs, payload)
             .await
             .expect("task result should return Some")
             .expect_err("task result should be Err");
@@ -407,7 +426,7 @@ mod test {
             spawner,
         };
 
-        let err = run_subtask(0, syncs, payload)
+        let err = run_subtask(tracing::Span::current(), 0, syncs, payload)
             .await
             .expect("task result should return Some")
             .expect_err("task result should be Err");

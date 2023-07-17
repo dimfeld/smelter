@@ -5,6 +5,8 @@ pub mod manager;
 pub mod scheduler;
 pub mod spawn;
 pub mod task_status;
+#[cfg(test)]
+mod test_util;
 
 pub struct TaskDefWithOutput<DEF: Send> {
     task_def: DEF,
@@ -27,8 +29,8 @@ pub trait TaskInfo: Debug {
 
 #[async_trait::async_trait]
 pub trait TaskType: Send + Sync {
-    type TaskDef: Send;
-    type SubTaskDef: TaskInfo + Send;
+    type TaskDef: Send + Debug;
+    type SubTaskDef: TaskInfo + Send + Debug;
     type Error: std::error::Error + error_stack::Context + Send + Sync;
 
     /// Given an initial task definition, create a list of subtasks to run.
