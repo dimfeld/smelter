@@ -8,6 +8,8 @@ use std::borrow::Cow;
 use error_stack::Report;
 use thiserror::Error;
 
+use crate::manager::SubtaskId;
+
 #[async_trait::async_trait]
 pub trait Spawner: Send + Sync + 'static {
     type SpawnedTask: SpawnedTask;
@@ -18,7 +20,7 @@ pub trait Spawner: Send + Sync + 'static {
     /// Spawn a task with the given input. The input is a JSON-serialized version of the task definition.
     async fn spawn(
         &self,
-        local_id: String,
+        task_id: SubtaskId,
         task_name: Cow<'static, str>,
         input: Vec<u8>,
     ) -> Result<Self::SpawnedTask, Report<TaskError>>;

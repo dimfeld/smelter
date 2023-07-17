@@ -8,6 +8,8 @@ use error_stack::{IntoReport, Report, ResultExt};
 use tokio::sync::Semaphore;
 use tracing::{instrument, Level};
 
+use super::SubtaskId;
+
 pub(super) type SubtaskResult = Result<SubtaskOutput, Report<TaskError>>;
 
 #[derive(Debug)]
@@ -17,10 +19,8 @@ pub struct SubtaskOutput {
 
 pub(super) struct SubtaskPayload<SPAWNER: Spawner> {
     pub input: Vec<u8>,
-    pub stage_index: usize,
     pub spawn_name: Cow<'static, str>,
-    pub local_id: String,
-    pub try_num: usize,
+    pub task_id: SubtaskId,
     pub status_collector: StatusCollector,
     pub spawner: Arc<SPAWNER>,
 }
@@ -31,10 +31,9 @@ pub(super) struct SubtaskSyncs {
     pub cancel: tokio::sync::watch::Receiver<()>,
 }
 
-#[instrument(level=Level::DEBUG, ret, parent=&parent_span, skip(syncs, parent_span, payload), fields(stage_index = payload.stage_index, try_num=payload.try_num))]
+#[instrument(level=Level::DEBUG, ret, parent=&parent_span, skip(syncs, parent_span, payload), fields(task_id = ?payload.task_id))]
 pub(super) async fn run_subtask<SPAWNER: Spawner>(
     parent_span: tracing::Span,
-    task_index: usize,
     syncs: Arc<SubtaskSyncs>,
     payload: SubtaskPayload<SPAWNER>,
 ) -> Option<SubtaskResult> {
@@ -59,40 +58,30 @@ pub(super) async fn run_subtask<SPAWNER: Spawner>(
         return None;
     }
 
-    let result = run_subtask_internal(cancel.clone(), task_index, payload).await;
+    let result = run_subtask_internal(cancel.clone(), payload).await;
     Some(result)
 }
 
-#[instrument(level=Level::TRACE, skip(cancel, payload), fields(stage_index = payload.stage_index, try_num=payload.try_num))]
+#[instrument(level=Level::TRACE, skip(cancel, payload), fields(task_id = %payload.task_id))]
 async fn run_subtask_internal<SPAWNER: Spawner>(
     mut cancel: tokio::sync::watch::Receiver<()>,
-    task_index: usize,
     payload: SubtaskPayload<SPAWNER>,
 ) -> SubtaskResult {
     let SubtaskPayload {
         input,
-        stage_index,
         spawn_name,
-        local_id,
-        try_num,
+        task_id,
         status_collector,
         spawner,
     } = payload;
 
-    let mut task = spawner.spawn(local_id, spawn_name, input).await?;
+    let mut task = spawner.spawn(task_id, spawn_name, input).await?;
     let runtime_id = task.runtime_id().await?;
-    status_collector.add(
-        stage_index,
-        task_index,
-        StatusUpdateInput::Spawned(runtime_id.clone()),
-    );
+    status_collector.add(task_id, StatusUpdateInput::Spawned(runtime_id.clone()));
 
     tokio::select! {
         res = task.wait() => {
-            res
-                .attach_printable_lazy(|| format!("Job {task_index} try {try_num}"))
-                .attach_printable_lazy(|| format!("Runtime ID {runtime_id}"))?;
-
+            res.attach_printable_lazy(|| format!("Job {task_id} Runtime ID {runtime_id}"))?;
         }
 
         _ = cancel.changed() => {
@@ -137,28 +126,30 @@ mod test {
     #[tokio::test]
     async fn successful_task() {
         let spawner = Arc::new(InProcessSpawner::new(|info| async move {
-            Ok(format!("result {}", info.local_id))
+            Ok(format!("result {}", info.task_id))
         }));
 
         let (status_collector, _cancel_tx, syncs) = create_task_input();
 
         let payload = SubtaskPayload {
             input: Vec::new(),
-            stage_index: 0,
             spawn_name: Cow::Borrowed("test"),
-            local_id: "the_id".to_string(),
-            try_num: 0,
             status_collector: status_collector.clone(),
+            task_id: SubtaskId {
+                stage: 0,
+                task: 0,
+                try_num: 0,
+            },
             spawner,
         };
 
-        let result = run_subtask(tracing::Span::current(), 0, syncs, payload)
+        let result = run_subtask(tracing::Span::current(), syncs, payload)
             .await
             .expect("task result should return Some")
             .expect("task result should be Ok");
         assert_eq!(
             result.output_location,
-            "test_the_id".to_string(),
+            "test_000-00000-00".to_string(),
             "output location"
         );
     }
@@ -167,22 +158,24 @@ mod test {
     async fn cancel_task() {
         let spawner = Arc::new(InProcessSpawner::new(|info| async move {
             futures::future::pending::<()>().await;
-            Ok::<_, TaskError>(format!("result {}", info.local_id))
+            Ok::<_, TaskError>(format!("result {}", info.task_id))
         }));
 
         let (status_collector, cancel_tx, syncs) = create_task_input();
 
         let payload = SubtaskPayload {
             input: Vec::new(),
-            stage_index: 0,
             spawn_name: Cow::Borrowed("test"),
-            local_id: "the_id".to_string(),
-            try_num: 0,
+            task_id: SubtaskId {
+                stage: 0,
+                task: 0,
+                try_num: 0,
+            },
             status_collector: status_collector.clone(),
             spawner,
         };
 
-        let task = tokio::task::spawn(run_subtask(tracing::Span::current(), 0, syncs, payload));
+        let task = tokio::task::spawn(run_subtask(tracing::Span::current(), syncs, payload));
 
         drop(cancel_tx);
 
@@ -202,7 +195,7 @@ mod test {
     #[tokio::test]
     async fn semaphore_waits() {
         let spawner = Arc::new(InProcessSpawner::new(|info| async move {
-            Ok(format!("result {}", info.local_id))
+            Ok(format!("result {}", info.task_id))
         }));
 
         let (status_collector, _cancel_tx, syncs) = create_task_input();
@@ -231,17 +224,18 @@ mod test {
 
         let payload = SubtaskPayload {
             input: Vec::new(),
-            stage_index: 0,
             spawn_name: Cow::Borrowed("test"),
-            local_id: "the_id".to_string(),
-            try_num: 0,
+            task_id: SubtaskId {
+                stage: 0,
+                task: 0,
+                try_num: 0,
+            },
             status_collector: status_collector.clone(),
             spawner,
         };
 
         let task = tokio::task::spawn(run_subtask(
             tracing::Span::current(),
-            0,
             syncs.clone(),
             payload,
         ));
@@ -274,7 +268,7 @@ mod test {
             .expect("task result should be Ok");
         assert_eq!(
             result.output_location,
-            "test_the_id".to_string(),
+            "test_000-00000-00".to_string(),
             "output location"
         );
     }
@@ -282,7 +276,7 @@ mod test {
     #[tokio::test]
     async fn global_semaphore_closes() {
         let spawner = Arc::new(InProcessSpawner::new(|info| async move {
-            Ok(format!("result {}", info.local_id))
+            Ok(format!("result {}", info.task_id))
         }));
 
         let (status_collector, _cancel_tx, syncs) = create_task_input();
@@ -306,17 +300,18 @@ mod test {
 
         let payload = SubtaskPayload {
             input: Vec::new(),
-            stage_index: 0,
             spawn_name: Cow::Borrowed("test"),
-            local_id: "the_id".to_string(),
-            try_num: 0,
+            task_id: SubtaskId {
+                stage: 0,
+                task: 0,
+                try_num: 0,
+            },
             status_collector: status_collector.clone(),
             spawner,
         };
 
         let task = tokio::task::spawn(run_subtask(
             tracing::Span::current(),
-            0,
             syncs.clone(),
             payload,
         ));
@@ -335,7 +330,7 @@ mod test {
     #[tokio::test]
     async fn job_semaphore_closes() {
         let spawner = Arc::new(InProcessSpawner::new(|info| async move {
-            Ok(format!("result {}", info.local_id))
+            Ok(format!("result {}", info.task_id))
         }));
 
         let (status_collector, _cancel_tx, syncs) = create_task_input();
@@ -357,17 +352,18 @@ mod test {
 
         let payload = SubtaskPayload {
             input: Vec::new(),
-            stage_index: 0,
             spawn_name: Cow::Borrowed("test"),
-            local_id: "the_id".to_string(),
-            try_num: 0,
+            task_id: SubtaskId {
+                stage: 0,
+                task: 0,
+                try_num: 0,
+            },
             status_collector: status_collector.clone(),
             spawner,
         };
 
         let task = tokio::task::spawn(run_subtask(
             tracing::Span::current(),
-            0,
             syncs.clone(),
             payload,
         ));
@@ -392,15 +388,17 @@ mod test {
 
         let payload = SubtaskPayload {
             input: Vec::new(),
-            stage_index: 0,
             spawn_name: Cow::Borrowed("test"),
-            local_id: "the_id".to_string(),
-            try_num: 0,
+            task_id: SubtaskId {
+                stage: 0,
+                task: 0,
+                try_num: 0,
+            },
             status_collector: status_collector.clone(),
             spawner,
         };
 
-        let err = run_subtask(tracing::Span::current(), 0, syncs, payload)
+        let err = run_subtask(tracing::Span::current(), syncs, payload)
             .await
             .expect("task result should return Some")
             .expect_err("task result should be Err");
@@ -410,7 +408,7 @@ mod test {
     #[tokio::test]
     async fn failed_to_spawn() {
         let spawner = Arc::new(FailingSpawner::new(
-            InProcessSpawner::new(|info| async move { Ok(format!("result {}", info.local_id)) }),
+            InProcessSpawner::new(|info| async move { Ok(format!("result {}", info.task_id)) }),
             |_| Err(TaskError::DidNotStart(true)),
         ));
 
@@ -418,15 +416,17 @@ mod test {
 
         let payload = SubtaskPayload {
             input: Vec::new(),
-            stage_index: 0,
             spawn_name: Cow::Borrowed("test"),
-            local_id: "the_id".to_string(),
-            try_num: 0,
+            task_id: SubtaskId {
+                stage: 0,
+                task: 0,
+                try_num: 0,
+            },
             status_collector: status_collector.clone(),
             spawner,
         };
 
-        let err = run_subtask(tracing::Span::current(), 0, syncs, payload)
+        let err = run_subtask(tracing::Span::current(), syncs, payload)
             .await
             .expect("task result should return Some")
             .expect_err("task result should be Err");

@@ -3,6 +3,7 @@ use std::borrow::Cow;
 use super::*;
 use async_trait::async_trait;
 use thiserror::Error;
+use tracing::info;
 
 struct TestTask {
     num_stages: usize,
@@ -86,8 +87,7 @@ mod run_tasks_stage {
         };
 
         let spawner = Arc::new(InProcessSpawner::new(|info| async move {
-            // println!("Running task {}", info.local_id);
-            Ok(format!("result {}", info.local_id))
+            Ok(format!("result {}", info.task_id))
         }));
 
         let manager = JobManager::new(
@@ -120,16 +120,15 @@ mod run_tasks_stage {
         };
 
         let spawner = Arc::new(InProcessSpawner::new(|info| async move {
-            println!("Running task {}", info.local_id);
-            let segments = info.local_id.split(':').collect::<Vec<_>>();
-            let sleep_time = if segments[1] == "00002" && segments[2] == "00" {
+            info!("Running task {}", info.task_id);
+            let sleep_time = if info.task_id.task == 2 && info.task_id.try_num == 0 {
                 10000
             } else {
                 10
             };
             tokio::time::sleep(Duration::from_millis(sleep_time)).await;
-            println!("Finished task {}", info.local_id);
-            Ok(format!("result {}", info.local_id))
+            info!("Finished task {}", info.task_id);
+            Ok(format!("result {}", info.task_id))
         }));
 
         let manager = JobManager::new(
@@ -150,7 +149,7 @@ mod run_tasks_stage {
             .await
             .expect("Run succeeded");
         assert_eq!(result.len(), 5);
-        println!("{:?}", result);
+        info!("{:?}", result);
     }
 
     #[tokio::test]

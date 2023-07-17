@@ -5,6 +5,8 @@ use error_stack::{IntoReport, Report, ResultExt};
 use std::{borrow::Cow, path::PathBuf, process::ExitStatus};
 use tokio::io::AsyncWriteExt;
 
+use crate::manager::SubtaskId;
+
 use super::{SpawnedTask, Spawner, TaskError};
 
 pub struct LocalSpawner {}
@@ -15,14 +17,14 @@ impl Spawner for LocalSpawner {
 
     async fn spawn(
         &self,
-        local_id: String,
+        task_id: SubtaskId,
         task_name: Cow<'static, str>,
         input: Vec<u8>,
     ) -> Result<Self::SpawnedTask, Report<TaskError>> {
         let dir = std::env::temp_dir();
 
-        let input_path = dir.join(format!("{local_id}-input.json"));
-        let output_path = dir.join(format!("{local_id}-output"));
+        let input_path = dir.join(format!("{task_id}-input.json"));
+        let output_path = dir.join(format!("{task_id}-output"));
 
         let mut input_file = tokio::fs::File::create(&input_path)
             .await

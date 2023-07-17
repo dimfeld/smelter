@@ -14,9 +14,22 @@ use crate::{
 use error_stack::{IntoReport, IntoReportCompat, Report, ResultExt};
 use futures::{stream::FuturesUnordered, FutureExt, StreamExt};
 use tokio::sync::Semaphore;
-use tracing::{info, instrument};
+use tracing::instrument;
 
 use self::run_subtask::{SubtaskPayload, SubtaskSyncs};
+
+#[derive(Debug, Copy, Clone)]
+pub struct SubtaskId {
+    pub stage: u16,
+    pub task: u32,
+    pub try_num: u16,
+}
+
+impl std::fmt::Display for SubtaskId {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "{:03}-{:05}-{:02}", self.stage, self.task, self.try_num)
+    }
+}
 
 #[derive(Debug)]
 struct TaskTrackingInfo<INPUT: Debug> {
@@ -126,6 +139,12 @@ impl<TASKTYPE: TaskType, SPAWNER: Spawner> JobManager<TASKTYPE, SPAWNER> {
                           task: &TaskTrackingInfo<DEF>,
                           futures: &mut FuturesUnordered<_>,
                           failed: &mut bool| {
+            let task_id = SubtaskId {
+                stage: stage_index as u16,
+                task: i as u32,
+                try_num: task.try_num as u16,
+            };
+
             let input = task
                 .input
                 .serialize_input()
@@ -135,23 +154,17 @@ impl<TASKTYPE: TaskType, SPAWNER: Spawner> JobManager<TASKTYPE, SPAWNER> {
             let input = match input {
                 Ok(p) => p,
                 Err(e) => {
-                    status_collector.add(stage_index, i, StatusUpdateInput::Failed(e));
+                    status_collector.add(task_id, StatusUpdateInput::Failed(e));
                     *failed = true;
                     return;
                 }
             };
 
             let spawn_name = task.input.spawn_name();
-            let local_id = format!(
-                "{stage_index:03}:{i:05}:{try_num:02}",
-                try_num = task.try_num
-            );
             let payload = SubtaskPayload {
                 input,
                 spawn_name,
-                local_id,
-                stage_index,
-                try_num: task.try_num,
+                task_id,
                 status_collector: status_collector.clone(),
                 spawner: self.spawner.clone(),
             };
@@ -159,7 +172,6 @@ impl<TASKTYPE: TaskType, SPAWNER: Spawner> JobManager<TASKTYPE, SPAWNER> {
             let current_span = tracing::Span::current();
             let new_task = tokio::task::spawn(run_subtask::run_subtask(
                 current_span,
-                i,
                 syncs.clone(),
                 payload,
             ))
@@ -200,11 +212,13 @@ impl<TASKTYPE: TaskType, SPAWNER: Spawner> JobManager<TASKTYPE, SPAWNER> {
                                 for (i, task) in unfinished.iter_mut().enumerate() {
                                     if let Some(task) = task.as_mut() {
                                         status_collector.add(
-                                            stage_index,
-                                            i,
-                                            StatusUpdateInput::Retry((
-                                                task.try_num,
-                                                Report::new(TaskError::TailRetry),
+                                            SubtaskId {
+                                                stage: stage_index as u16,
+                                                task: i as u32,
+                                                try_num: task.try_num as u16,
+                                            },
+                                            StatusUpdateInput::Retry(Report::new(
+                                                TaskError::TailRetry,
                                             )),
                                         );
 
@@ -218,22 +232,20 @@ impl<TASKTYPE: TaskType, SPAWNER: Spawner> JobManager<TASKTYPE, SPAWNER> {
                     // Task finished with an error.
                     Ok(Some(Err(e))) => {
                         if let Some(task_info) = unfinished[task_index].as_mut() {
+                            let task_id = SubtaskId {
+                                stage: stage_index as u16,
+                                task: task_index as u32,
+                                try_num: task_info.try_num as u16,
+                            };
+
                             if e.current_context().retryable()
                                 && task_info.try_num <= self.scheduler.max_retries
                             {
-                                status_collector.add(
-                                    stage_index,
-                                    task_index,
-                                    StatusUpdateInput::Retry((task_info.try_num, e)),
-                                );
+                                status_collector.add(task_id, StatusUpdateInput::Retry(e));
                                 task_info.try_num += 1;
                                 spawn_task(task_index, task_info, &mut running_tasks, &mut failed);
                             } else {
-                                status_collector.add(
-                                    stage_index,
-                                    task_index,
-                                    StatusUpdateInput::Failed(e),
-                                );
+                                status_collector.add(task_id, StatusUpdateInput::Failed(e));
                                 failed = true;
                             }
                         }
@@ -243,20 +255,18 @@ impl<TASKTYPE: TaskType, SPAWNER: Spawner> JobManager<TASKTYPE, SPAWNER> {
                     Err(e) => {
                         if let Some(task_info) = unfinished[task_index].as_mut() {
                             let e = Report::new(e).change_context(TaskError::Failed(true));
+                            let task_id = SubtaskId {
+                                stage: stage_index as u16,
+                                task: task_index as u32,
+                                try_num: task_info.try_num as u16,
+                            };
+
                             if task_info.try_num <= self.scheduler.max_retries {
-                                status_collector.add(
-                                    stage_index,
-                                    task_index,
-                                    StatusUpdateInput::Retry((task_info.try_num, e)),
-                                );
+                                status_collector.add(task_id, StatusUpdateInput::Retry(e));
                                 task_info.try_num += 1;
                                 spawn_task(task_index, task_info, &mut running_tasks, &mut failed);
                             } else {
-                                status_collector.add(
-                                    stage_index,
-                                    task_index,
-                                    StatusUpdateInput::Failed(e),
-                                );
+                                status_collector.add(task_id, StatusUpdateInput::Failed(e));
                                 failed = true;
                             }
                         }

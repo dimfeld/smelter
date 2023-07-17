@@ -3,6 +3,8 @@ use std::borrow::Cow;
 use async_trait::async_trait;
 use error_stack::{IntoReport, Report};
 
+use crate::manager::SubtaskId;
+
 use super::{inprocess::InProcessTaskInfo, Spawner, TaskError};
 
 pub struct FailingSpawner<
@@ -33,18 +35,18 @@ impl<
 
     async fn spawn(
         &self,
-        local_id: String,
+        task_id: SubtaskId,
         task_name: Cow<'static, str>,
         input: Vec<u8>,
     ) -> Result<Self::SpawnedTask, Report<TaskError>> {
         let info = InProcessTaskInfo {
             task_name: task_name.to_string(),
-            local_id: local_id.to_string(),
+            task_id,
             input_value: &input,
         };
 
         (self.fail_func)(info).into_report()?;
 
-        self.inner.spawn(local_id, task_name, input).await
+        self.inner.spawn(task_id, task_name, input).await
     }
 }

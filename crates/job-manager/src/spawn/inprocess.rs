@@ -7,11 +7,15 @@ use error_stack::{IntoReport, Report, ResultExt};
 use std::{borrow::Cow, future::Future};
 use tokio::{sync::oneshot, task::JoinHandle};
 
+use crate::manager::SubtaskId;
+#[cfg(test)]
+use crate::test_util::setup_test_tracing;
+
 use super::{SpawnedTask, Spawner, TaskError};
 
 pub struct InProcessTaskInfo<'a> {
     pub task_name: String,
-    pub local_id: String,
+    pub task_id: SubtaskId,
     pub input_value: &'a [u8],
 }
 
@@ -32,6 +36,9 @@ where
     RESULT: Clone + Send + 'static,
 {
     pub fn new(task_fn: FUNC) -> Self {
+        #[cfg(test)]
+        setup_test_tracing();
+
         Self {
             task_fn,
             output: OutputCollector::new(),
@@ -50,21 +57,21 @@ where
 
     async fn spawn(
         &self,
-        local_id: String,
+        task_id: SubtaskId,
         task_name: Cow<'static, str>,
         input: Vec<u8>,
     ) -> Result<Self::SpawnedTask, Report<TaskError>> {
-        let output_location = format!("{task_name}_{local_id}");
+        let output_location = format!("{task_name}_{task_id}");
         let output = self.output.clone();
         let task_fn = self.task_fn.clone();
         let input = input.to_vec();
         let task = InProcessSpawnedTask {
-            task_id: local_id.to_string(),
+            task_id,
             output_location: output_location.clone(),
             task: Some(tokio::task::spawn(async move {
                 let result = (task_fn)(InProcessTaskInfo {
                     task_name: task_name.to_string(),
-                    local_id: local_id.to_string(),
+                    task_id,
                     input_value: &input,
                 })
                 .await?;
@@ -79,7 +86,7 @@ where
 }
 
 pub struct InProcessSpawnedTask {
-    task_id: String,
+    task_id: SubtaskId,
     output_location: String,
     task: Option<JoinHandle<Result<(), TaskError>>>,
 }
@@ -87,7 +94,7 @@ pub struct InProcessSpawnedTask {
 #[async_trait]
 impl SpawnedTask for InProcessSpawnedTask {
     async fn runtime_id(&self) -> Result<String, TaskError> {
-        Ok(self.task_id.clone())
+        Ok(self.task_id.to_string())
     }
 
     async fn kill(&mut self) -> Result<(), Report<TaskError>> {
@@ -208,14 +215,23 @@ mod test {
 
     #[tokio::test]
     async fn spawner() {
-        let spawner =
-            super::InProcessSpawner::new(
-                |info| async move { Ok(format!("result {}", info.local_id)) },
-            );
+        let spawner = super::InProcessSpawner::new(|info| async move {
+            Ok(format!("result {}", info.task_id.task))
+        });
 
         let tasks = futures::stream::iter(1..=3)
             .map(Ok)
-            .and_then(|i| spawner.spawn(format!("task_{}", i), "map".into(), vec![]))
+            .and_then(|i| {
+                spawner.spawn(
+                    SubtaskId {
+                        stage: 0,
+                        task: i,
+                        try_num: 0,
+                    },
+                    "map".into(),
+                    vec![],
+                )
+            })
             .try_collect::<Vec<_>>()
             .await
             .expect("Creating tasks");
@@ -226,8 +242,18 @@ mod test {
 
         let output = spawner.output.read().await;
         assert_eq!(output.len(), 3);
-        assert_eq!(output.get("map_task_1"), Some(&"result task_1".to_string()));
-        assert_eq!(output.get("map_task_2"), Some(&"result task_2".to_string()));
-        assert_eq!(output.get("map_task_3"), Some(&"result task_3".to_string()));
+        println!("output: {:?}", output);
+        assert_eq!(
+            output.get("map_000-00001-00"),
+            Some(&"result 1".to_string())
+        );
+        assert_eq!(
+            output.get("map_000-00002-00"),
+            Some(&"result 2".to_string())
+        );
+        assert_eq!(
+            output.get("map_000-00003-00"),
+            Some(&"result 3".to_string())
+        );
     }
 }

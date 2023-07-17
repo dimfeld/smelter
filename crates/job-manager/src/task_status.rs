@@ -3,13 +3,13 @@ use std::sync::Arc;
 use error_stack::Report;
 use tokio::sync::oneshot;
 
-use crate::spawn::TaskError;
+use crate::{manager::SubtaskId, spawn::TaskError};
 
 #[derive(Debug, Clone)]
 pub enum StatusUpdateData {
     Spawned(String),
     // Report is not clonable so just stick it on the heap.
-    Retry((usize, Arc<Report<TaskError>>)),
+    Retry(Arc<Report<TaskError>>),
     Failed(Arc<Report<TaskError>>),
     Success(String),
 }
@@ -18,7 +18,7 @@ pub enum StatusUpdateData {
 /// for you, such as wrapping the Report in an Arc.
 pub enum StatusUpdateInput {
     Spawned(String),
-    Retry((usize, Report<TaskError>)),
+    Retry(Report<TaskError>),
     Failed(Report<TaskError>),
     Success(String),
 }
@@ -27,7 +27,7 @@ impl From<StatusUpdateInput> for StatusUpdateData {
     fn from(value: StatusUpdateInput) -> Self {
         match value {
             StatusUpdateInput::Spawned(s) => StatusUpdateData::Spawned(s),
-            StatusUpdateInput::Retry((i, report)) => StatusUpdateData::Retry((i, Arc::new(report))),
+            StatusUpdateInput::Retry(report) => StatusUpdateData::Retry(Arc::new(report)),
             StatusUpdateInput::Failed(report) => StatusUpdateData::Failed(Arc::new(report)),
             StatusUpdateInput::Success(s) => StatusUpdateData::Success(s),
         }
@@ -36,8 +36,7 @@ impl From<StatusUpdateInput> for StatusUpdateData {
 
 #[derive(Debug, Clone)]
 pub struct StatusUpdateItem {
-    stage: usize,
-    task_index: usize,
+    task_id: SubtaskId,
     timestamp: time::OffsetDateTime,
     data: StatusUpdateData,
 }
@@ -83,11 +82,10 @@ impl StatusCollector {
         collector
     }
 
-    pub fn add(&self, stage: usize, task_index: usize, data: impl Into<StatusUpdateData>) {
+    pub fn add(&self, task_id: SubtaskId, data: impl Into<StatusUpdateData>) {
         self.tx
             .send(StatusUpdateOp::Item(StatusUpdateItem {
-                stage,
-                task_index,
+                task_id,
                 timestamp: time::OffsetDateTime::now_utc(),
                 data: data.into(),
             }))
