@@ -2,7 +2,9 @@ use std::{borrow::Cow, sync::Arc};
 
 use crate::{
     spawn::{SpawnedTask, Spawner, TaskError},
-    task_status::{StatusCollector, StatusUpdateInput},
+    task_status::{
+        StatusCollector, StatusUpdateInput, StatusUpdateSpawnedData, StatusUpdateSuccessData,
+    },
 };
 use error_stack::{IntoReport, Report, ResultExt};
 use tokio::sync::Semaphore;
@@ -77,12 +79,23 @@ async fn run_subtask_internal<SPAWNER: Spawner>(
 
     let mut task = spawner.spawn(task_id, spawn_name, input).await?;
     let runtime_id = task.runtime_id().await?;
-    status_collector.add(task_id, StatusUpdateInput::Spawned(runtime_id.clone()));
+    status_collector.add(
+        task_id,
+        StatusUpdateInput::Spawned(StatusUpdateSpawnedData {
+            runtime_id: runtime_id.clone(),
+        }),
+    );
+
+    let output_location = task.output_location();
 
     tokio::select! {
         res = task.wait() => {
             res.attach_printable_lazy(|| format!("Job {task_id} Runtime ID {runtime_id}"))?;
-            status_collector.add(task_id, StatusUpdateInput::Success(task.output_location()));
+            status_collector.add(task_id, StatusUpdateInput::Success(
+                    StatusUpdateSuccessData {
+                        output_location: output_location.clone(),
+                    }
+                ));
         }
 
         _ = cancel.changed() => {
@@ -92,9 +105,7 @@ async fn run_subtask_internal<SPAWNER: Spawner>(
         }
     };
 
-    let output = SubtaskOutput {
-        output_location: task.output_location(),
-    };
+    let output = SubtaskOutput { output_location };
 
     Ok(output)
 }

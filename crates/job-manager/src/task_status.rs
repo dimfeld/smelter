@@ -6,23 +6,33 @@ use tokio::sync::oneshot;
 use crate::{manager::SubtaskId, spawn::TaskError};
 
 #[derive(Debug, Clone)]
+pub struct StatusUpdateSpawnedData {
+    pub runtime_id: String,
+}
+
+#[derive(Debug, Clone)]
+pub struct StatusUpdateSuccessData {
+    pub output_location: String,
+}
+
+#[derive(Debug, Clone)]
 pub enum StatusUpdateData {
-    Spawned(String),
+    Spawned(StatusUpdateSpawnedData),
     // Report is not clonable so just stick it on the heap.
     Retry(Arc<Report<TaskError>>),
     Failed(Arc<Report<TaskError>>),
     Cancelled,
-    Success(String),
+    Success(StatusUpdateSuccessData),
 }
 
 /// This structure can be passed to [StatusCollector::add] and does some of the conversions
 /// for you, such as wrapping the Report in an Arc.
 pub enum StatusUpdateInput {
-    Spawned(String),
+    Spawned(StatusUpdateSpawnedData),
     Retry(Report<TaskError>),
     Failed(Report<TaskError>),
     Cancelled,
-    Success(String),
+    Success(StatusUpdateSuccessData),
 }
 
 impl From<StatusUpdateInput> for StatusUpdateData {

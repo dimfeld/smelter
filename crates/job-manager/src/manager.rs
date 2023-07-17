@@ -2,21 +2,20 @@ mod run_subtask;
 #[cfg(test)]
 mod tests;
 
-use std::fmt::Debug;
-use std::sync::Arc;
+use std::{fmt::Debug, sync::Arc};
 
-use crate::{
-    scheduler::{SchedulerBehavior, SlowTaskBehavior},
-    spawn::{Spawner, TaskError},
-    task_status::{StatusCollector, StatusUpdateInput},
-    TaskDefWithOutput, TaskInfo, TaskType,
-};
 use error_stack::{IntoReport, IntoReportCompat, Report, ResultExt};
 use futures::{stream::FuturesUnordered, FutureExt, StreamExt};
 use tokio::sync::Semaphore;
 use tracing::instrument;
 
 use self::run_subtask::{SubtaskPayload, SubtaskSyncs};
+use crate::{
+    scheduler::{SchedulerBehavior, SlowTaskBehavior},
+    spawn::{Spawner, TaskError},
+    task_status::{StatusCollector, StatusUpdateInput},
+    TaskDefWithOutput, TaskInfo, TaskType,
+};
 
 #[derive(Debug, Copy, Clone)]
 pub struct SubtaskId {
