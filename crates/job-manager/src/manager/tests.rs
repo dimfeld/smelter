@@ -10,7 +10,6 @@ use crate::{
     scheduler::{SchedulerBehavior, SlowTaskBehavior},
     spawn::{fail_wrapper::FailingSpawner, inprocess::InProcessSpawner, TaskError},
     task_status::{StatusCollector, StatusUpdateData},
-    test_util::setup_test_tracing,
     TaskDefWithOutput, TaskInfo, TaskType,
 };
 
@@ -20,7 +19,9 @@ struct TestTask {
 }
 
 #[derive(Debug, Default)]
-struct TestTaskDef {}
+struct TestTaskDef {
+    fail_serialize: Option<SubtaskId>,
+}
 
 #[derive(Debug)]
 struct TestSubTaskDef {
@@ -46,6 +47,28 @@ impl TaskInfo for TestSubTaskDef {
     }
 }
 
+impl TestTask {
+    async fn create_subtasks(
+        &self,
+        task_def: &TestTaskDef,
+        stage_num: usize,
+    ) -> Result<Vec<TestSubTaskDef>, TestError> {
+        let tasks = (0..self.tasks_per_stage)
+            .map(|task_index| {
+                let fail_serialize = task_def
+                    .fail_serialize
+                    .map(|id| id.stage == stage_num as u16 && id.task == task_index as u32)
+                    .unwrap_or(false);
+                TestSubTaskDef {
+                    spawn_name: "test".to_string(),
+                    fail_serialize,
+                }
+            })
+            .collect();
+        Ok(tasks)
+    }
+}
+
 #[async_trait]
 impl TaskType for TestTask {
     type TaskDef = TestTaskDef;
@@ -55,15 +78,9 @@ impl TaskType for TestTask {
 
     async fn create_initial_subtasks(
         &self,
-        _task_def: &Self::TaskDef,
+        task_def: &Self::TaskDef,
     ) -> Result<Vec<Self::SubTaskDef>, TestError> {
-        let tasks = (0..self.tasks_per_stage)
-            .map(|_| TestSubTaskDef {
-                spawn_name: "test".to_string(),
-                fail_serialize: false,
-            })
-            .collect();
-        Ok(tasks)
+        self.create_subtasks(task_def, 0).await
     }
 
     async fn create_subtasks_from_result(
@@ -75,7 +92,7 @@ impl TaskType for TestTask {
         if stage_number + 1 >= self.num_stages {
             Ok(Vec::new())
         } else {
-            self.create_initial_subtasks(task_def).await
+            self.create_subtasks(task_def, stage_number).await
         }
     }
 }
@@ -372,12 +389,120 @@ async fn too_many_retries() {
 }
 
 #[tokio::test]
-#[ignore]
-async fn task_panicked() {}
+async fn task_panicked() {
+    let spawner = Arc::new(FailingSpawner::new(
+        InProcessSpawner::new(|info| async move { Ok(format!("result {}", info.task_id)) }),
+        |info| {
+            if info.task_id.task == 2 && info.task_id.try_num == 0 {
+                panic!("test panic")
+            }
+
+            Ok(())
+        },
+    ));
+
+    let task_data = TestTask {
+        num_stages: 2,
+        tasks_per_stage: 5,
+    };
+
+    let manager = JobManager::new(
+        task_data,
+        spawner,
+        SchedulerBehavior {
+            max_concurrent_tasks: None,
+            max_retries: 2,
+            slow_task_behavior: SlowTaskBehavior::Wait,
+        },
+        None,
+    );
+
+    let status = StatusCollector::new(10);
+
+    let mut result = manager
+        .run(status.clone(), TestTaskDef::default())
+        .await
+        .expect("Run succeeded");
+    result.sort();
+
+    info!("{:?}", result);
+    assert_eq!(
+        result,
+        vec![
+            "test_001-00000-00".to_string(),
+            "test_001-00001-00".to_string(),
+            "test_001-00002-01".to_string(),
+            "test_001-00003-00".to_string(),
+            "test_001-00004-00".to_string(),
+        ],
+        "Finished tasks should be the retry task for task 2"
+    );
+}
 
 #[tokio::test]
-#[ignore]
-async fn task_payload_serialize_failure() {}
+async fn task_payload_serialize_failure() {
+    let task_data = TestTask {
+        num_stages: 2,
+        tasks_per_stage: 5,
+    };
+
+    let spawner = Arc::new(InProcessSpawner::new(|info| async move {
+        Ok(format!("result {}", info.task_id))
+    }));
+
+    let manager = JobManager::new(
+        task_data,
+        spawner,
+        SchedulerBehavior {
+            max_concurrent_tasks: None,
+            max_retries: 2,
+            slow_task_behavior: SlowTaskBehavior::Wait,
+        },
+        None,
+    );
+
+    let status = StatusCollector::new(10);
+
+    let result = manager
+        .run(
+            status.clone(),
+            TestTaskDef {
+                fail_serialize: Some(SubtaskId {
+                    stage: 0,
+                    task: 2,
+                    try_num: 0,
+                }),
+            },
+        )
+        .await
+        .expect_err("Run failed");
+
+    info!("{:?}", result);
+    assert_eq!(
+        result.current_context(),
+        &TaskError::Failed(false),
+        "Should finish with failed error"
+    );
+
+    let status = status.take().await;
+    status
+        .iter()
+        .find(|item| {
+            item.task_id.stage == 0
+                && item.task_id.task == 2
+                && item.task_id.try_num == 0
+                && matches!(item.data, StatusUpdateData::Failed(_))
+        })
+        .expect("Should find status item for failed try");
+
+    let later_items = status
+        .iter()
+        .find(|item| item.task_id.stage == 0 && item.task_id.task == 2 && item.task_id.try_num > 0);
+    assert!(
+        later_items.is_none(),
+        "Should not have tried to run task after permanent failure"
+    );
+}
 
 #[tokio::test]
 async fn max_concurrent_tasks() {
