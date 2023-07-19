@@ -1,15 +1,19 @@
 //! Run workers as normal processes on the local system. This is generally only useful for
 //! development and testing.
 
-use error_stack::{IntoReport, Report, ResultExt};
 use std::{borrow::Cow, path::PathBuf, process::ExitStatus};
+
+use error_stack::{IntoReport, Report, ResultExt};
 use tokio::io::AsyncWriteExt;
 
+use super::{SpawnedTask, Spawner, TaskError};
 use crate::manager::SubtaskId;
 
-use super::{SpawnedTask, Spawner, TaskError};
-
-pub struct LocalSpawner {}
+#[derive(Default)]
+pub struct LocalSpawner {
+    shell: bool,
+    tmpdir: Option<PathBuf>,
+}
 
 #[async_trait::async_trait]
 impl Spawner for LocalSpawner {
@@ -21,7 +25,11 @@ impl Spawner for LocalSpawner {
         task_name: Cow<'static, str>,
         input: Vec<u8>,
     ) -> Result<Self::SpawnedTask, Report<TaskError>> {
-        let dir = std::env::temp_dir();
+        let dir = self
+            .tmpdir
+            .as_deref()
+            .map(Cow::from)
+            .unwrap_or_else(|| Cow::from(std::env::temp_dir()));
 
         let input_path = dir.join(format!("{task_id}-input.json"));
         let output_path = dir.join(format!("{task_id}-output"));
@@ -46,7 +54,14 @@ impl Spawner for LocalSpawner {
             .change_context(TaskError::DidNotStart(false))
             .attach_printable("Failed to write input definition")?;
 
-        let child_process = tokio::process::Command::new(task_name.as_ref())
+        let (exec_name, args) = if self.shell {
+            ("sh", vec!["-c", task_name.as_ref()])
+        } else {
+            (task_name.as_ref(), vec![])
+        };
+
+        let child_process = tokio::process::Command::new(exec_name)
+            .args(args)
             .env("INPUT_FILE", &input_path)
             .env("OUTPUT_FILE", &output_path)
             .spawn()
@@ -122,5 +137,48 @@ impl SpawnedTask for LocalSpawnedTask {
 impl Drop for LocalSpawnedTask {
     fn drop(&mut self) {
         tokio::spawn(tokio::fs::remove_file(self.input_path.clone()));
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use tokio::io::AsyncReadExt;
+
+    use super::*;
+
+    #[tokio::test]
+    async fn spawn() {
+        let dir = tempfile::TempDir::new().expect("Creating temp dir");
+        let spawner = LocalSpawner {
+            shell: true,
+            tmpdir: Some(dir.path().to_path_buf()),
+        };
+        let mut task = spawner
+            .spawn(
+                SubtaskId {
+                    stage: 0,
+                    task: 0,
+                    try_num: 0,
+                },
+                Cow::from("cat $INPUT_FILE > $OUTPUT_FILE"),
+                "test-output".as_bytes().to_vec(),
+            )
+            .await
+            .expect("Spawning task");
+
+        task.wait().await.expect("Waiting for task");
+
+        let mut output_file = tokio::fs::File::open(task.output_location())
+            .await
+            .expect("Opening output file");
+        let mut contents = Vec::new();
+        output_file
+            .read_to_end(&mut contents)
+            .await
+            .expect("Reading output file");
+        assert_eq!(
+            String::from_utf8(contents).expect("reading output to string"),
+            "test-output"
+        );
     }
 }

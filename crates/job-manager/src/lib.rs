@@ -1,5 +1,4 @@
-use std::borrow::Cow;
-use std::fmt::Debug;
+use std::{borrow::Cow, fmt::Debug};
 
 pub mod manager;
 pub mod scheduler;
@@ -40,16 +39,11 @@ pub trait TaskType: Send + Sync {
     ) -> Result<Vec<Self::SubTaskDef>, Self::Error>;
 
     /// Create reducer tasks to run on the output of a previous stage. If there is nothing left to
-    /// do, return an empty Vector.
+    /// do, return an empty Vec.
     async fn create_subtasks_from_result(
         &self,
         task_def: &Self::TaskDef,
         stage_number: usize,
         subtasks: &[TaskDefWithOutput<Self::SubTaskDef>],
     ) -> Result<Vec<Self::SubTaskDef>, Self::Error>;
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
 }
