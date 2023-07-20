@@ -1,17 +1,17 @@
 //! Run workers in the same process as the scheduler. This is only really useful for some unit
 //! tests.
 
+use std::{borrow::Cow, future::Future};
+
 use ahash::HashMap;
 use async_trait::async_trait;
 use error_stack::{IntoReport, Report, ResultExt};
-use std::{borrow::Cow, future::Future};
 use tokio::{sync::oneshot, task::JoinHandle};
 
+use super::{SpawnedTask, Spawner, TaskError};
 use crate::manager::SubtaskId;
 #[cfg(test)]
 use crate::test_util::setup_test_tracing;
-
-use super::{SpawnedTask, Spawner, TaskError};
 
 pub struct InProcessTaskInfo<'a> {
     pub task_name: String,
@@ -19,39 +19,32 @@ pub struct InProcessTaskInfo<'a> {
     pub input_value: &'a [u8],
 }
 
-pub struct InProcessSpawner<F, FUNC, RESULT>
+pub struct InProcessSpawner<F, FUNC>
 where
-    F: Future<Output = Result<RESULT, TaskError>> + 'static,
+    F: Future<Output = Result<String, TaskError>> + 'static,
     FUNC: FnOnce(InProcessTaskInfo) -> F + Send + Sync + Clone + 'static,
-    RESULT: Clone + Send + 'static,
 {
     task_fn: FUNC,
-    pub output: OutputCollector<RESULT>,
 }
 
-impl<F, FUNC, RESULT> InProcessSpawner<F, FUNC, RESULT>
+impl<F, FUNC> InProcessSpawner<F, FUNC>
 where
-    F: Future<Output = Result<RESULT, TaskError>> + 'static,
+    F: Future<Output = Result<String, TaskError>> + 'static,
     FUNC: FnOnce(InProcessTaskInfo) -> F + Send + Sync + Clone + 'static,
-    RESULT: Clone + Send + 'static,
 {
     pub fn new(task_fn: FUNC) -> Self {
         #[cfg(test)]
         setup_test_tracing();
 
-        Self {
-            task_fn,
-            output: OutputCollector::new(),
-        }
+        Self { task_fn }
     }
 }
 
 #[async_trait]
-impl<F, FUNC, RESULT> Spawner for InProcessSpawner<F, FUNC, RESULT>
+impl<F, FUNC> Spawner for InProcessSpawner<F, FUNC>
 where
-    F: Future<Output = Result<RESULT, TaskError>> + Send + Sync,
+    F: Future<Output = Result<String, TaskError>> + Send + Sync,
     FUNC: FnOnce(InProcessTaskInfo) -> F + Send + Sync + Clone + 'static,
-    RESULT: Clone + Send + 'static,
 {
     type SpawnedTask = InProcessSpawnedTask;
 
@@ -61,13 +54,10 @@ where
         task_name: Cow<'static, str>,
         input: Vec<u8>,
     ) -> Result<Self::SpawnedTask, Report<TaskError>> {
-        let output_location = format!("{task_name}_{task_id}");
-        let output = self.output.clone();
         let task_fn = self.task_fn.clone();
         let input = input.to_vec();
         let task = InProcessSpawnedTask {
             task_id,
-            output_location: output_location.clone(),
             task: Some(tokio::task::spawn(async move {
                 let result = (task_fn)(InProcessTaskInfo {
                     task_name: task_name.to_string(),
@@ -76,8 +66,7 @@ where
                 })
                 .await?;
 
-                output.write(output_location, result);
-                Ok::<(), TaskError>(())
+                Ok::<Vec<u8>, TaskError>(result.into())
             })),
         };
 
@@ -87,8 +76,7 @@ where
 
 pub struct InProcessSpawnedTask {
     task_id: SubtaskId,
-    output_location: String,
-    task: Option<JoinHandle<Result<(), TaskError>>>,
+    task: Option<JoinHandle<Result<Vec<u8>, TaskError>>>,
 }
 
 #[async_trait]
@@ -105,9 +93,9 @@ impl SpawnedTask for InProcessSpawnedTask {
         Ok(())
     }
 
-    async fn wait(&mut self) -> Result<(), Report<TaskError>> {
+    async fn wait(&mut self) -> Result<Vec<u8>, Report<TaskError>> {
         let Some(task) = self.task.take() else {
-            return Ok(());
+            return Ok(Vec::new());
         };
 
         let result = task.await;
@@ -120,13 +108,7 @@ impl SpawnedTask for InProcessSpawnedTask {
         result
             .into_report()
             .change_context(TaskError::Failed(retryable))?
-            .into_report()?;
-
-        Ok(())
-    }
-
-    fn output_location(&self) -> String {
-        self.output_location.clone()
+            .into_report()
     }
 }
 
@@ -236,24 +218,16 @@ mod test {
             .await
             .expect("Creating tasks");
 
+        let mut outputs = std::collections::HashMap::new();
         for mut task in tasks {
-            task.wait().await.expect("Waiting for task");
+            let output = String::from_utf8(task.wait().await.expect("Waiting for task"))
+                .expect("decoding string");
+            outputs.insert(task.task_id.to_string(), output);
         }
 
-        let output = spawner.output.read().await;
-        assert_eq!(output.len(), 3);
-        println!("output: {:?}", output);
-        assert_eq!(
-            output.get("map_000-00001-00"),
-            Some(&"result 1".to_string())
-        );
-        assert_eq!(
-            output.get("map_000-00002-00"),
-            Some(&"result 2".to_string())
-        );
-        assert_eq!(
-            output.get("map_000-00003-00"),
-            Some(&"result 3".to_string())
-        );
+        println!("output: {:?}", outputs);
+        assert_eq!(outputs.get("000-00001-00"), Some(&"result 1".to_string()));
+        assert_eq!(outputs.get("000-00002-00"), Some(&"result 2".to_string()));
+        assert_eq!(outputs.get("000-00003-00"), Some(&"result 3".to_string()));
     }
 }

@@ -1,5 +1,7 @@
 use std::{borrow::Cow, fmt::Debug};
 
+use serde::de::DeserializeOwned;
+
 pub mod manager;
 pub mod scheduler;
 pub mod spawn;
@@ -7,9 +9,10 @@ pub mod task_status;
 #[cfg(test)]
 mod test_util;
 
-pub struct TaskDefWithOutput<DEF: Send> {
+#[derive(Debug)]
+pub struct TaskDefWithOutput<DEF: Send + Debug, OUTPUT: Debug + DeserializeOwned + Send + 'static> {
     task_def: DEF,
-    output_location: String,
+    output: OUTPUT,
 }
 
 pub enum FailureType {
@@ -30,6 +33,7 @@ pub trait TaskInfo: Debug {
 pub trait TaskType: Send + Sync {
     type TaskDef: Send + Debug;
     type SubTaskDef: TaskInfo + Send + Debug;
+    type SubtaskOutput: Debug + DeserializeOwned + Send + 'static;
     type Error: std::error::Error + error_stack::Context + Send + Sync;
 
     /// Given an initial task definition, create a list of subtasks to run.
@@ -44,6 +48,8 @@ pub trait TaskType: Send + Sync {
         &self,
         task_def: &Self::TaskDef,
         stage_number: usize,
-        subtasks: &[TaskDefWithOutput<Self::SubTaskDef>],
+        subtasks: &[TaskDefWithOutput<Self::SubTaskDef, Self::SubtaskOutput>],
     ) -> Result<Vec<Self::SubTaskDef>, Self::Error>;
+
+    fn read_task_response(data: Vec<u8>) -> Result<Self::SubtaskOutput, Self::Error>;
 }

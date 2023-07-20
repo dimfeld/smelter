@@ -4,7 +4,7 @@
 use std::{borrow::Cow, path::PathBuf, process::ExitStatus};
 
 use error_stack::{IntoReport, Report, ResultExt};
-use tokio::io::AsyncWriteExt;
+use tokio::io::{AsyncReadExt, AsyncWriteExt};
 
 use super::{SpawnedTask, Spawner, TaskError};
 use crate::manager::SubtaskId;
@@ -118,7 +118,7 @@ impl SpawnedTask for LocalSpawnedTask {
             .change_context(TaskError::Failed(false))
     }
 
-    async fn wait(&mut self) -> Result<(), Report<TaskError>> {
+    async fn wait(&mut self) -> Result<Vec<u8>, Report<TaskError>> {
         let result = self
             .child_process
             .wait()
@@ -126,11 +126,19 @@ impl SpawnedTask for LocalSpawnedTask {
             .into_report()
             .change_context(TaskError::Lost)?;
 
-        Self::handle_exit_status(result)
-    }
+        Self::handle_exit_status(result)?;
 
-    fn output_location(&self) -> String {
-        self.output_path.to_string_lossy().to_string()
+        let mut file = tokio::fs::File::open(&self.output_path)
+            .await
+            .into_report()
+            .change_context(TaskError::Failed(true))
+            .attach_printable_lazy(|| self.output_path.display().to_string())?;
+        let mut data = Vec::new();
+        file.read_to_end(&mut data)
+            .await
+            .into_report()
+            .change_context(TaskError::Failed(true))?;
+        Ok(data)
     }
 }
 
@@ -142,8 +150,6 @@ impl Drop for LocalSpawnedTask {
 
 #[cfg(test)]
 mod tests {
-    use tokio::io::AsyncReadExt;
-
     use super::*;
 
     #[tokio::test]
@@ -166,18 +172,10 @@ mod tests {
             .await
             .expect("Spawning task");
 
-        task.wait().await.expect("Waiting for task");
+        let output = task.wait().await.expect("Waiting for task");
 
-        let mut output_file = tokio::fs::File::open(task.output_location())
-            .await
-            .expect("Opening output file");
-        let mut contents = Vec::new();
-        output_file
-            .read_to_end(&mut contents)
-            .await
-            .expect("Reading output file");
         assert_eq!(
-            String::from_utf8(contents).expect("reading output to string"),
+            String::from_utf8(output).expect("reading output to string"),
             "test-output"
         );
     }

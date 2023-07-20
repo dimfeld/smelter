@@ -1,22 +1,22 @@
 use std::{borrow::Cow, sync::Arc};
 
+use error_stack::{IntoReport, Report, ResultExt};
+use tokio::sync::Semaphore;
+use tracing::{instrument, Level};
+
+use super::SubtaskId;
 use crate::{
     spawn::{SpawnedTask, Spawner, TaskError},
     task_status::{
         StatusCollector, StatusUpdateInput, StatusUpdateSpawnedData, StatusUpdateSuccessData,
     },
 };
-use error_stack::{IntoReport, Report, ResultExt};
-use tokio::sync::Semaphore;
-use tracing::{instrument, Level};
-
-use super::SubtaskId;
 
 pub(super) type SubtaskResult = Result<SubtaskOutput, Report<TaskError>>;
 
 #[derive(Debug)]
 pub struct SubtaskOutput {
-    pub output_location: String,
+    pub output: Vec<u8>,
 }
 
 pub(super) struct SubtaskPayload<SPAWNER: Spawner> {
@@ -86,28 +86,24 @@ async fn run_subtask_internal<SPAWNER: Spawner>(
         }),
     );
 
-    let output_location = task.output_location();
-
     tokio::select! {
         res = task.wait() => {
-            res.attach_printable_lazy(|| format!("Job {task_id} Runtime ID {runtime_id}"))?;
+            let res = res.attach_printable_lazy(|| format!("Job {task_id} Runtime ID {runtime_id}"))?;
             status_collector.add(task_id, StatusUpdateInput::Success(
                     StatusUpdateSuccessData {
-                        output_location: output_location.clone(),
+                        output: res.clone(),
                     }
                 ));
+
+            Ok(SubtaskOutput { output: res })
         }
 
         _ = cancel.changed() => {
             task.kill().await.ok();
             status_collector.add(task_id, StatusUpdateInput::Cancelled);
-            return Err(TaskError::Cancelled).into_report();
+            Err(TaskError::Cancelled).into_report()
         }
-    };
-
-    let output = SubtaskOutput { output_location };
-
-    Ok(output)
+    }
 }
 
 #[cfg(test)]
@@ -161,9 +157,9 @@ mod test {
             .expect("task result should return Some")
             .expect("task result should be Ok");
         assert_eq!(
-            result.output_location,
-            "test_000-00000-00".to_string(),
-            "output location"
+            String::from_utf8(result.output).expect("decoding utf8"),
+            "result 000-00000-00",
+            "output"
         );
     }
 
@@ -280,8 +276,8 @@ mod test {
             .expect("task result should return Some")
             .expect("task result should be Ok");
         assert_eq!(
-            result.output_location,
-            "test_000-00000-00".to_string(),
+            String::from_utf8(result.output).expect("decoding utf8"),
+            "result 000-00000-00",
             "output location"
         );
     }
@@ -395,7 +391,7 @@ mod test {
     #[tokio::test]
     async fn failed_task() {
         let spawner = Arc::new(InProcessSpawner::new(|_| async move {
-            Err::<(), _>(TaskError::Failed(false))
+            Err::<String, _>(TaskError::Failed(false))
         }));
         let (status_collector, _cancel_tx, syncs) = create_task_input();
 

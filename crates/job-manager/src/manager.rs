@@ -63,7 +63,10 @@ impl<TASKTYPE: TaskType, SPAWNER: Spawner> JobManager<TASKTYPE, SPAWNER> {
         &self,
         status_collector: StatusCollector,
         task_def: TASKTYPE::TaskDef,
-    ) -> Result<Vec<String>, Report<TaskError>> {
+    ) -> Result<
+        Vec<TaskDefWithOutput<TASKTYPE::SubTaskDef, TASKTYPE::SubtaskOutput>>,
+        Report<TaskError>,
+    > {
         let mut stage_tasks = self
             .task_type
             .create_initial_subtasks(&task_def)
@@ -85,10 +88,7 @@ impl<TASKTYPE: TaskType, SPAWNER: Spawner> JobManager<TASKTYPE, SPAWNER> {
                 .change_context(TaskError::TaskGenerationFailed)?;
 
             if stage_tasks.is_empty() {
-                return Ok(stage_results
-                    .into_iter()
-                    .map(|task| task.output_location)
-                    .collect());
+                return Ok(stage_results);
             }
 
             stage_index += 1;
@@ -96,12 +96,15 @@ impl<TASKTYPE: TaskType, SPAWNER: Spawner> JobManager<TASKTYPE, SPAWNER> {
     }
 
     #[instrument(skip(self, status_collector, inputs), fields(num_tasks = inputs.len()))]
-    async fn run_tasks_stage<DEF: TaskInfo + Send>(
+    async fn run_tasks_stage(
         &self,
         stage_index: usize,
         status_collector: StatusCollector,
-        inputs: Vec<DEF>,
-    ) -> Result<Vec<TaskDefWithOutput<DEF>>, Report<TaskError>> {
+        inputs: Vec<TASKTYPE::SubTaskDef>,
+    ) -> Result<
+        Vec<TaskDefWithOutput<TASKTYPE::SubTaskDef, TASKTYPE::SubtaskOutput>>,
+        Report<TaskError>,
+    > {
         let max_concurrent_tasks = self
             .scheduler
             .max_concurrent_tasks
@@ -135,7 +138,7 @@ impl<TASKTYPE: TaskType, SPAWNER: Spawner> JobManager<TASKTYPE, SPAWNER> {
 
         let mut running_tasks = FuturesUnordered::new();
         let spawn_task = |i: usize,
-                          task: &TaskTrackingInfo<DEF>,
+                          task: &TaskTrackingInfo<TASKTYPE::SubTaskDef>,
                           futures: &mut FuturesUnordered<_>,
                           failed: &mut bool| {
             let task_id = SubtaskId {
@@ -188,41 +191,95 @@ impl<TASKTYPE: TaskType, SPAWNER: Spawner> JobManager<TASKTYPE, SPAWNER> {
 
         let mut performed_tail_retry = false;
 
+        let mut retry_or_fail =
+            |failed: &mut bool,
+             futures: &mut FuturesUnordered<_>,
+             e: Report<TaskError>,
+             task_index: usize,
+             task_info: &mut TaskTrackingInfo<TASKTYPE::SubTaskDef>| {
+                let task_id = SubtaskId {
+                    stage: stage_index as u16,
+                    task: task_index as u32,
+                    try_num: task_info.try_num as u16,
+                };
+
+                if e.current_context().retryable() && task_info.try_num < self.scheduler.max_retries
+                {
+                    status_collector.add(task_id, StatusUpdateInput::Retry(e));
+                    task_info.try_num += 1;
+                    spawn_task(task_index, task_info, futures, failed);
+                } else {
+                    status_collector.add(task_id, StatusUpdateInput::Failed(e));
+                    *failed = true;
+                }
+            };
+
         while !failed && output_list.len() < total_num_tasks {
             if let Some((task_index, result)) = running_tasks.next().await {
+                // let result = match result {
+                //     Ok(Some(Ok(output))) => {
+                //         let output = TASKTYPE::read_task_response(&output.output)
+                //             .into_report()
+                //             .change_context(TaskError::Failed(true));
+                //         Ok(Some(output))
+                //     }
+                //     _ => result,
+                // };
+
                 match result {
                     // The semaphore closed so the task did not run. This means that the whole
                     // system is shutting down, so don't worry about it here.
                     Ok(None) => {}
                     Ok(Some(Ok(output))) => {
-                        if let Some(task_info) = unfinished[task_index].take() {
-                            output_list.push(TaskDefWithOutput {
-                                task_def: task_info.input,
-                                output_location: output.output_location,
-                            });
+                        if let Some(mut task_info) = unfinished[task_index].take() {
+                            let output = TASKTYPE::read_task_response(output.output);
+                            match output {
+                                Err(e) => {
+                                    retry_or_fail(
+                                        &mut failed,
+                                        &mut running_tasks,
+                                        Report::new(e).change_context(TaskError::Failed(true)),
+                                        task_index,
+                                        &mut task_info,
+                                    );
+                                    // Deserialization failed, so put it back.
+                                    unfinished[task_index] = Some(task_info);
+                                }
+                                Ok(output) => {
+                                    output_list.push(TaskDefWithOutput {
+                                        task_def: task_info.input,
+                                        output,
+                                    });
 
-                            if !performed_tail_retry
-                                && total_num_tasks - output_list.len() <= retry_all_at
-                            {
-                                performed_tail_retry = true;
+                                    if !performed_tail_retry
+                                        && total_num_tasks - output_list.len() <= retry_all_at
+                                    {
+                                        performed_tail_retry = true;
 
-                                // Re-enqueue all unfinished tasks. Some serverless platforms
-                                // can have very high tail latency, so this gets around that issue.
-                                for (i, task) in unfinished.iter_mut().enumerate() {
-                                    if let Some(task) = task.as_mut() {
-                                        status_collector.add(
-                                            SubtaskId {
-                                                stage: stage_index as u16,
-                                                task: i as u32,
-                                                try_num: task.try_num as u16,
-                                            },
-                                            StatusUpdateInput::Retry(Report::new(
-                                                TaskError::TailRetry,
-                                            )),
-                                        );
+                                        // Re-enqueue all unfinished tasks. Some serverless platforms
+                                        // can have very high tail latency, so this gets around that issue.
+                                        for (i, task) in unfinished.iter_mut().enumerate() {
+                                            if let Some(task) = task.as_mut() {
+                                                status_collector.add(
+                                                    SubtaskId {
+                                                        stage: stage_index as u16,
+                                                        task: i as u32,
+                                                        try_num: task.try_num as u16,
+                                                    },
+                                                    StatusUpdateInput::Retry(Report::new(
+                                                        TaskError::TailRetry,
+                                                    )),
+                                                );
 
-                                        task.try_num += 1;
-                                        spawn_task(i, task, &mut running_tasks, &mut failed);
+                                                task.try_num += 1;
+                                                spawn_task(
+                                                    i,
+                                                    task,
+                                                    &mut running_tasks,
+                                                    &mut failed,
+                                                );
+                                            }
+                                        }
                                     }
                                 }
                             }
@@ -231,22 +288,13 @@ impl<TASKTYPE: TaskType, SPAWNER: Spawner> JobManager<TASKTYPE, SPAWNER> {
                     // Task finished with an error.
                     Ok(Some(Err(e))) => {
                         if let Some(task_info) = unfinished[task_index].as_mut() {
-                            let task_id = SubtaskId {
-                                stage: stage_index as u16,
-                                task: task_index as u32,
-                                try_num: task_info.try_num as u16,
-                            };
-
-                            if e.current_context().retryable()
-                                && task_info.try_num < self.scheduler.max_retries
-                            {
-                                status_collector.add(task_id, StatusUpdateInput::Retry(e));
-                                task_info.try_num += 1;
-                                spawn_task(task_index, task_info, &mut running_tasks, &mut failed);
-                            } else {
-                                status_collector.add(task_id, StatusUpdateInput::Failed(e));
-                                failed = true;
-                            }
+                            retry_or_fail(
+                                &mut failed,
+                                &mut running_tasks,
+                                e,
+                                task_index,
+                                task_info,
+                            );
                         }
                     }
                     // Task panicked. We can't really decipher the error so always consider it
@@ -254,20 +302,13 @@ impl<TASKTYPE: TaskType, SPAWNER: Spawner> JobManager<TASKTYPE, SPAWNER> {
                     Err(e) => {
                         if let Some(task_info) = unfinished[task_index].as_mut() {
                             let e = Report::new(e).change_context(TaskError::Failed(true));
-                            let task_id = SubtaskId {
-                                stage: stage_index as u16,
-                                task: task_index as u32,
-                                try_num: task_info.try_num as u16,
-                            };
-
-                            if task_info.try_num < self.scheduler.max_retries {
-                                status_collector.add(task_id, StatusUpdateInput::Retry(e));
-                                task_info.try_num += 1;
-                                spawn_task(task_index, task_info, &mut running_tasks, &mut failed);
-                            } else {
-                                status_collector.add(task_id, StatusUpdateInput::Failed(e));
-                                failed = true;
-                            }
+                            retry_or_fail(
+                                &mut failed,
+                                &mut running_tasks,
+                                e,
+                                task_index,
+                                task_info,
+                            );
                         }
                     }
                 }

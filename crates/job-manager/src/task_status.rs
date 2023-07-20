@@ -12,7 +12,7 @@ pub struct StatusUpdateSpawnedData {
 
 #[derive(Debug, Clone)]
 pub struct StatusUpdateSuccessData {
-    pub output_location: String,
+    pub output: Vec<u8>,
 }
 
 #[derive(Debug, Clone)]

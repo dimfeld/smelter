@@ -1,3 +1,5 @@
+// #[cfg(feature = "aws_lambda")]
+pub mod aws_lambda;
 pub mod fail_wrapper;
 #[cfg(feature = "inprocess")]
 pub mod inprocess;
@@ -60,12 +62,10 @@ impl TaskError {
 
 #[async_trait::async_trait]
 pub trait SpawnedTask: Send + Sync + 'static {
-    /// The internal ID of the spawned task in the runtime.
+    /// The internal ID of the spawned task in the runtime, when accessible.
     async fn runtime_id(&self) -> Result<String, TaskError>;
     /// Return a future that resolves when a task finishes.
-    async fn wait(&mut self) -> Result<(), Report<TaskError>>;
+    async fn wait(&mut self) -> Result<Vec<u8>, Report<TaskError>>;
     /// Attempt to kill a task before it finishes.
     async fn kill(&mut self) -> Result<(), Report<TaskError>>;
-    /// Return the location where the task should have written its output.
-    fn output_location(&self) -> String;
 }

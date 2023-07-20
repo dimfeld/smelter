@@ -73,6 +73,7 @@ impl TestTask {
 impl TaskType for TestTask {
     type TaskDef = TestTaskDef;
     type SubTaskDef = TestSubTaskDef;
+    type SubtaskOutput = String;
 
     type Error = TestError;
 
@@ -87,13 +88,17 @@ impl TaskType for TestTask {
         &self,
         task_def: &Self::TaskDef,
         stage_number: usize,
-        _subtasks: &[TaskDefWithOutput<Self::SubTaskDef>],
+        _subtasks: &[TaskDefWithOutput<Self::SubTaskDef, Self::SubtaskOutput>],
     ) -> Result<Vec<Self::SubTaskDef>, Self::Error> {
         if stage_number + 1 >= self.num_stages {
             Ok(Vec::new())
         } else {
             self.create_subtasks(task_def, stage_number).await
         }
+    }
+
+    fn read_task_response(data: Vec<u8>) -> Result<Self::SubtaskOutput, Self::Error> {
+        String::from_utf8(data).map_err(|_| TestError {})
     }
 }
 
@@ -156,15 +161,18 @@ async fn single_stage() {
     let result = manager
         .run(status.clone(), TestTaskDef::default())
         .await
-        .expect("Run succeeded");
+        .expect("Run succeeded")
+        .into_iter()
+        .map(|result| result.output)
+        .collect::<Vec<_>>();
     assert_eq!(
         result,
         vec![
-            "test_000-00000-00".to_string(),
-            "test_000-00001-00".to_string(),
-            "test_000-00002-00".to_string(),
-            "test_000-00003-00".to_string(),
-            "test_000-00004-00".to_string(),
+            "result 000-00000-00".to_string(),
+            "result 000-00001-00".to_string(),
+            "result 000-00002-00".to_string(),
+            "result 000-00003-00".to_string(),
+            "result 000-00004-00".to_string(),
         ],
     );
 }
@@ -205,18 +213,21 @@ async fn tail_retry() {
     let mut result = manager
         .run(status.clone(), TestTaskDef::default())
         .await
-        .expect("Run succeeded");
+        .expect("Run succeeded")
+        .into_iter()
+        .map(|result| result.output)
+        .collect::<Vec<_>>();
     result.sort();
 
     info!("{:?}", result);
     assert_eq!(
         result,
         vec![
-            "test_001-00000-01".to_string(),
-            "test_001-00001-00".to_string(),
-            "test_001-00002-01".to_string(),
-            "test_001-00003-00".to_string(),
-            "test_001-00004-00".to_string(),
+            "result 001-00000-01".to_string(),
+            "result 001-00001-00".to_string(),
+            "result 001-00002-01".to_string(),
+            "result 001-00003-00".to_string(),
+            "result 001-00004-00".to_string(),
         ],
         "Finished tasks should be the tail retry tasks for 0 and 2"
     );
@@ -255,18 +266,21 @@ async fn retry_failures() {
     let mut result = manager
         .run(status.clone(), TestTaskDef::default())
         .await
-        .expect("Run succeeded");
+        .expect("Run succeeded")
+        .into_iter()
+        .map(|result| result.output)
+        .collect::<Vec<_>>();
     result.sort();
 
     info!("{:?}", result);
     assert_eq!(
         result,
         vec![
-            "test_001-00000-02".to_string(),
-            "test_001-00001-00".to_string(),
-            "test_001-00002-02".to_string(),
-            "test_001-00003-00".to_string(),
-            "test_001-00004-00".to_string(),
+            "result 001-00000-02".to_string(),
+            "result 001-00001-00".to_string(),
+            "result 001-00002-02".to_string(),
+            "result 001-00003-00".to_string(),
+            "result 001-00004-00".to_string(),
         ],
         "Finished tasks should be the retry tasks for 0 and 2"
     );
@@ -422,18 +436,21 @@ async fn task_panicked() {
     let mut result = manager
         .run(status.clone(), TestTaskDef::default())
         .await
-        .expect("Run succeeded");
+        .expect("Run succeeded")
+        .into_iter()
+        .map(|result| result.output)
+        .collect::<Vec<_>>();
     result.sort();
 
     info!("{:?}", result);
     assert_eq!(
         result,
         vec![
-            "test_001-00000-00".to_string(),
-            "test_001-00001-00".to_string(),
-            "test_001-00002-01".to_string(),
-            "test_001-00003-00".to_string(),
-            "test_001-00004-00".to_string(),
+            "result 001-00000-00".to_string(),
+            "result 001-00001-00".to_string(),
+            "result 001-00002-01".to_string(),
+            "result 001-00003-00".to_string(),
+            "result 001-00004-00".to_string(),
         ],
         "Finished tasks should be the retry task for task 2"
     );
