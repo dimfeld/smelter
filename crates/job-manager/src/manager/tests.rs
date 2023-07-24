@@ -571,3 +571,57 @@ async fn max_concurrent_tasks() {
 
     assert_eq!(max_active, 2, "No more than 2 tasks running at onces");
 }
+
+#[tokio::test]
+async fn wait_unordered() {
+    let task_data = TestTask {
+        num_stages: 1,
+        tasks_per_stage: 5,
+    };
+
+    let spawner = Arc::new(InProcessSpawner::new(|info| async move {
+        let duration = 100 - (info.task_id.task * 10);
+        tokio::time::sleep(Duration::from_millis(duration as u64)).await;
+        Ok(format!("result {}", info.task_id))
+    }));
+
+    let manager = JobManager::new(
+        task_data,
+        spawner,
+        SchedulerBehavior {
+            max_concurrent_tasks: None,
+            max_retries: 2,
+            slow_task_behavior: SlowTaskBehavior::Wait,
+        },
+        None,
+    );
+
+    let status = StatusCollector::new(10);
+
+    let result = manager
+        .run(status.clone(), TestTaskDef::default())
+        .await
+        .expect("Run succeeded")
+        .into_iter()
+        .map(|i| i.output)
+        .collect::<Vec<_>>();
+
+    let mut sorted = result.clone();
+    sorted.sort();
+
+    assert_eq!(
+        sorted,
+        vec![
+            "result 000-00000-00".to_string(),
+            "result 000-00001-00".to_string(),
+            "result 000-00002-00".to_string(),
+            "result 000-00003-00".to_string(),
+            "result 000-00004-00".to_string(),
+        ],
+    );
+
+    assert_ne!(
+        result, sorted,
+        "final task result should not correspond to order tasks were run"
+    );
+}
