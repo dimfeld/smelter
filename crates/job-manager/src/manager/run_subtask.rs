@@ -29,7 +29,7 @@ pub(super) struct SubtaskPayload<SPAWNER: Spawner> {
 
 pub(super) struct SubtaskSyncs {
     pub global_semaphore: Option<Arc<Semaphore>>,
-    pub job_semaphore: Semaphore,
+    pub job_semaphore: Arc<Semaphore>,
     pub cancel: tokio::sync::watch::Receiver<()>,
 }
 

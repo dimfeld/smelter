@@ -2,9 +2,10 @@ mod run_subtask;
 #[cfg(test)]
 mod tests;
 
-use std::{fmt::Debug, sync::Arc};
+use std::{fmt::Debug, marker::PhantomData, sync::Arc};
 
 use error_stack::{IntoReport, IntoReportCompat, Report, ResultExt};
+use flume::Sender;
 use futures::{stream::FuturesUnordered, FutureExt, StreamExt};
 use tokio::sync::Semaphore;
 use tracing::instrument;
@@ -14,7 +15,7 @@ use crate::{
     scheduler::{SchedulerBehavior, SlowTaskBehavior},
     spawn::{Spawner, TaskError},
     task_status::{StatusCollector, StatusUpdateInput},
-    TaskDefWithOutput, TaskInfo, TaskType,
+    TaskDef, TaskDefWithOutput, TaskInfo,
 };
 
 #[derive(Debug, Copy, Clone)]
@@ -36,37 +37,41 @@ struct TaskTrackingInfo<INPUT: Debug> {
     try_num: usize,
 }
 
-pub struct JobManager<TASKTYPE: TaskType, SPAWNER: Spawner> {
-    spawner: Arc<SPAWNER>,
-    task_type: TASKTYPE,
+pub struct JobManager<TASKDEF: TaskDef> {
     scheduler: SchedulerBehavior,
     global_semaphore: Option<Arc<Semaphore>>,
+    job_semaphore: Arc<Semaphore>,
+    status_collector: StatusCollector,
+    task_def: PhantomData<TASKDEF>,
 }
 
-impl<TASKTYPE: TaskType, SPAWNER: Spawner> JobManager<TASKTYPE, SPAWNER> {
+impl<TASKDEF: TaskDef> JobManager<TASKDEF> {
     pub fn new(
-        task_type: TASKTYPE,
-        spawner: Arc<SPAWNER>,
         scheduler: SchedulerBehavior,
+        status_collector: StatusCollector,
         global_semaphore: Option<Arc<Semaphore>>,
     ) -> Self {
+        let max_concurrent_tasks = scheduler.max_concurrent_tasks.unwrap_or(i32::MAX as usize);
+        let job_semaphore = Arc::new(Semaphore::new(max_concurrent_tasks));
+
         Self {
-            spawner,
-            task_type,
             scheduler,
+            status_collector,
             global_semaphore,
+            job_semaphore,
+            task_def: PhantomData::default(),
         }
     }
 
-    #[instrument(skip(self, status_collector))]
-    pub async fn run(
+    #[instrument(skip(self))]
+    pub async fn add_stage<SUBTASKDEF: TaskInfo>(
         &self,
-        status_collector: StatusCollector,
-        task_def: TASKTYPE::TaskDef,
-    ) -> Result<
-        Vec<TaskDefWithOutput<TASKTYPE::SubTaskDef, TASKTYPE::SubtaskOutput>>,
-        Report<TaskError>,
-    > {
+    ) -> Result<StageRunner<SUBTASKDEF>, Report<TaskError>> {
+        let (subtask_result_tx, subtask_result_rx) = flume::bounded(20);
+
+        // TODO Create a StageRunner and add something to track its status that doesn't require
+        // knowing its internal type.
+
         let mut stage_tasks = self
             .task_type
             .create_initial_subtasks(&task_def)
@@ -77,7 +82,7 @@ impl<TASKTYPE: TaskType, SPAWNER: Spawner> JobManager<TASKTYPE, SPAWNER> {
         let mut stage_index = 0;
         loop {
             let stage_results = self
-                .run_tasks_stage(stage_index, status_collector.clone(), stage_tasks)
+                .run_tasks_stage(stage_index, self.status_collector.clone(), stage_tasks)
                 .await?;
 
             stage_tasks = self
@@ -94,21 +99,35 @@ impl<TASKTYPE: TaskType, SPAWNER: Spawner> JobManager<TASKTYPE, SPAWNER> {
             stage_index += 1;
         }
     }
+}
 
-    #[instrument(skip(self, status_collector, inputs), fields(num_tasks = inputs.len()))]
-    async fn run_tasks_stage(
-        &self,
-        stage_index: usize,
-        status_collector: StatusCollector,
-        inputs: Vec<TASKTYPE::SubTaskDef>,
-    ) -> Result<
-        Vec<TaskDefWithOutput<TASKTYPE::SubTaskDef, TASKTYPE::SubtaskOutput>>,
-        Report<TaskError>,
-    > {
-        let max_concurrent_tasks = self
-            .scheduler
-            .max_concurrent_tasks
-            .unwrap_or(i32::MAX as usize);
+pub struct StageRunner<SUBTASK: TaskInfo> {
+    stage_index: usize,
+    subtask_result_tx: Sender<TaskDefWithOutput<SUBTASK>>,
+    new_task_tx: Option<Sender<SUBTASK>>,
+    scheduler: SchedulerBehavior,
+    status_collector: StatusCollector,
+    job_semaphore: Arc<Semaphore>,
+    global_semaphore: Option<Arc<Semaphore>>,
+    phantom: PhantomData<SUBTASK>,
+}
+
+impl<SUBTASK: TaskInfo> StageRunner<SUBTASK> {
+    pub async fn add_subtask(&mut self, task: SUBTASK) {
+        let Some(new_task_tx) = self.new_task_tx.as_ref() else {
+            panic!("Tried to add new subtask after it had closed");
+        };
+
+        new_task_tx.send_async(task).await.ok();
+    }
+
+    pub fn finish(&mut self) {
+        self.new_task_tx.take();
+    }
+
+    // TODO change this to be a separate Tokio task that gets tasks as they are added, and
+    #[instrument(skip(self))]
+    async fn run_tasks_stage(&self) -> Result<Vec<TaskDefWithOutput<SUBTASK>>, Report<TaskError>> {
         let total_num_tasks = inputs.len();
         let mut unfinished = inputs
             .into_iter()
@@ -129,20 +148,19 @@ impl<TASKTYPE: TaskType, SPAWNER: Spawner> JobManager<TASKTYPE, SPAWNER> {
         let (_cancel_tx, cancel_rx) = tokio::sync::watch::channel(());
         let mut failed = false;
 
-        let job_semaphore = Semaphore::new(max_concurrent_tasks);
         let syncs = Arc::new(SubtaskSyncs {
-            job_semaphore,
+            job_semaphore: self.job_semaphore.clone(),
             global_semaphore: self.global_semaphore.clone(),
             cancel: cancel_rx,
         });
 
         let mut running_tasks = FuturesUnordered::new();
         let spawn_task = |i: usize,
-                          task: &TaskTrackingInfo<TASKTYPE::SubTaskDef>,
+                          task: &TaskTrackingInfo<SUBTASK>,
                           futures: &mut FuturesUnordered<_>,
                           failed: &mut bool| {
             let task_id = SubtaskId {
-                stage: stage_index as u16,
+                stage: self.stage_index as u16,
                 task: i as u32,
                 try_num: task.try_num as u16,
             };
@@ -156,19 +174,17 @@ impl<TASKTYPE: TaskType, SPAWNER: Spawner> JobManager<TASKTYPE, SPAWNER> {
             let input = match input {
                 Ok(p) => p,
                 Err(e) => {
-                    status_collector.add(task_id, StatusUpdateInput::Failed(e));
+                    self.status_collector
+                        .add(task_id, StatusUpdateInput::Failed(e));
                     *failed = true;
                     return;
                 }
             };
 
-            let spawn_name = task.input.spawn_name();
             let payload = SubtaskPayload {
                 input,
-                spawn_name,
                 task_id,
-                status_collector: status_collector.clone(),
-                spawner: self.spawner.clone(),
+                status_collector: self.status_collector.clone(),
             };
 
             let current_span = tracing::Span::current();
@@ -196,20 +212,22 @@ impl<TASKTYPE: TaskType, SPAWNER: Spawner> JobManager<TASKTYPE, SPAWNER> {
              futures: &mut FuturesUnordered<_>,
              e: Report<TaskError>,
              task_index: usize,
-             task_info: &mut TaskTrackingInfo<TASKTYPE::SubTaskDef>| {
+             task_info: &mut TaskTrackingInfo<SUBTASK>| {
                 let task_id = SubtaskId {
-                    stage: stage_index as u16,
+                    stage: self.stage_index as u16,
                     task: task_index as u32,
                     try_num: task_info.try_num as u16,
                 };
 
                 if e.current_context().retryable() && task_info.try_num < self.scheduler.max_retries
                 {
-                    status_collector.add(task_id, StatusUpdateInput::Retry(e));
+                    self.status_collector
+                        .add(task_id, StatusUpdateInput::Retry(e));
                     task_info.try_num += 1;
                     spawn_task(task_index, task_info, futures, failed);
                 } else {
-                    status_collector.add(task_id, StatusUpdateInput::Failed(e));
+                    self.status_collector
+                        .add(task_id, StatusUpdateInput::Failed(e));
                     *failed = true;
                 }
             };
@@ -232,7 +250,7 @@ impl<TASKTYPE: TaskType, SPAWNER: Spawner> JobManager<TASKTYPE, SPAWNER> {
                     Ok(None) => {}
                     Ok(Some(Ok(output))) => {
                         if let Some(mut task_info) = unfinished[task_index].take() {
-                            let output = TASKTYPE::read_task_response(output.output);
+                            let output = SUBTASK::read_task_response(output.output);
                             match output {
                                 Err(e) => {
                                     retry_or_fail(
@@ -260,9 +278,9 @@ impl<TASKTYPE: TaskType, SPAWNER: Spawner> JobManager<TASKTYPE, SPAWNER> {
                                         // can have very high tail latency, so this gets around that issue.
                                         for (i, task) in unfinished.iter_mut().enumerate() {
                                             if let Some(task) = task.as_mut() {
-                                                status_collector.add(
+                                                self.status_collector.add(
                                                     SubtaskId {
-                                                        stage: stage_index as u16,
+                                                        stage: self.stage_index as u16,
                                                         task: i as u32,
                                                         try_num: task.try_num as u16,
                                                     },
