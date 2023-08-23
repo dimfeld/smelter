@@ -10,6 +10,7 @@ use crate::{
     task_status::{
         StatusCollector, StatusUpdateInput, StatusUpdateSpawnedData, StatusUpdateSuccessData,
     },
+    SubTask,
 };
 
 pub(super) type SubtaskResult = Result<SubtaskOutput, Report<TaskError>>;
@@ -19,12 +20,10 @@ pub struct SubtaskOutput {
     pub output: Vec<u8>,
 }
 
-pub(super) struct SubtaskPayload<SPAWNER: Spawner> {
-    pub input: Vec<u8>,
-    pub spawn_name: Cow<'static, str>,
+pub(super) struct SubtaskPayload<SUBTASK: SubTask> {
+    pub input: SUBTASK,
     pub task_id: SubtaskId,
     pub status_collector: StatusCollector,
-    pub spawner: Arc<SPAWNER>,
 }
 
 pub(super) struct SubtaskSyncs {
@@ -34,10 +33,10 @@ pub(super) struct SubtaskSyncs {
 }
 
 #[instrument(level=Level::DEBUG, ret, parent=&parent_span, skip(syncs, parent_span, payload), fields(task_id = ?payload.task_id))]
-pub(super) async fn run_subtask<SPAWNER: Spawner>(
+pub(super) async fn run_subtask<SUBTASK: SubTask>(
     parent_span: tracing::Span,
     syncs: Arc<SubtaskSyncs>,
-    payload: SubtaskPayload<SPAWNER>,
+    payload: SubtaskPayload<SUBTASK>,
 ) -> Option<SubtaskResult> {
     let SubtaskSyncs {
         global_semaphore,

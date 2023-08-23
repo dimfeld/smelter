@@ -10,7 +10,7 @@ use crate::{
     scheduler::{SchedulerBehavior, SlowTaskBehavior},
     spawn::{fail_wrapper::FailingSpawner, inprocess::InProcessSpawner, TaskError},
     task_status::{StatusCollector, StatusUpdateData},
-    TaskDefWithOutput, TaskInfo, TaskType,
+    SubTask, TaskDefWithOutput, TaskType,
 };
 
 struct TestTask {
@@ -33,7 +33,7 @@ struct TestSubTaskDef {
 #[error("A test error")]
 struct TestError {}
 
-impl TaskInfo for TestSubTaskDef {
+impl SubTask for TestSubTaskDef {
     fn spawn_name(&self) -> std::borrow::Cow<'static, str> {
         Cow::from(self.spawn_name.clone())
     }

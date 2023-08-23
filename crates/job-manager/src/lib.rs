@@ -13,7 +13,7 @@ pub mod task_status;
 mod test_util;
 
 #[derive(Debug)]
-pub struct TaskDefWithOutput<DEF: TaskInfo> {
+pub struct TaskDefWithOutput<DEF: SubTask> {
     pub task_def: DEF,
     pub output: DEF::Output,
 }
@@ -25,7 +25,7 @@ pub enum FailureType {
 }
 
 #[async_trait::async_trait]
-pub trait TaskInfo: Debug + Send {
+pub trait SubTask: Debug + Clone + Send {
     type Output: Debug + DeserializeOwned + Send + 'static;
 
     /// A name that describes the task.
@@ -37,12 +37,14 @@ pub trait TaskInfo: Debug + Send {
     fn read_task_response(data: Vec<u8>) -> Result<Self::Output, TaskError>;
 }
 
-#[async_trait::async_trait]
-pub trait TaskDef: Send + Sync + Debug {
-    type SubTaskDef: TaskInfo + Send + Debug;
-    type Error: std::error::Error + error_stack::Context + Send + Sync;
+async fn run_test() {
+    let job = Job::new();
 
-    // TODO Change this so that
-    /// Given an initial task definition, run the various subtasks and handle their results.
-    async fn run(&self) -> Result<(), Self::Error>;
+    // this returns a JobStage
+    let stage_1 = job.add_stage("stage 1");
+    stage_1.add_task();
+
+    for finished in stage_1.subtask_result {
+        // get jobs until we are done
+    }
 }
