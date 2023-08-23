@@ -64,19 +64,17 @@ pub(super) async fn run_subtask<SUBTASK: SubTask>(
 }
 
 #[instrument(level=Level::TRACE, skip(cancel, payload), fields(task_id = %payload.task_id))]
-async fn run_subtask_internal<SPAWNER: Spawner>(
+async fn run_subtask_internal<SUBTASK: SubTask>(
     mut cancel: tokio::sync::watch::Receiver<()>,
-    payload: SubtaskPayload<SPAWNER>,
+    payload: SubtaskPayload<SUBTASK>,
 ) -> SubtaskResult {
     let SubtaskPayload {
         input,
-        spawn_name,
         task_id,
         status_collector,
-        spawner,
     } = payload;
 
-    let mut task = spawner.spawn(task_id, spawn_name, input).await?;
+    let mut task = input.spawn(task_id).await?;
     let runtime_id = task.runtime_id().await?;
     status_collector.add(
         task_id,
@@ -141,14 +139,12 @@ mod test {
 
         let payload = SubtaskPayload {
             input: Vec::new(),
-            spawn_name: Cow::Borrowed("test"),
             status_collector: status_collector.clone(),
             task_id: SubtaskId {
                 stage: 0,
                 task: 0,
                 try_num: 0,
             },
-            spawner,
         };
 
         let result = run_subtask(tracing::Span::current(), syncs, payload)
@@ -173,14 +169,12 @@ mod test {
 
         let payload = SubtaskPayload {
             input: Vec::new(),
-            spawn_name: Cow::Borrowed("test"),
             task_id: SubtaskId {
                 stage: 0,
                 task: 0,
                 try_num: 0,
             },
             status_collector: status_collector.clone(),
-            spawner,
         };
 
         let task = tokio::task::spawn(run_subtask(tracing::Span::current(), syncs, payload));
@@ -232,14 +226,12 @@ mod test {
 
         let payload = SubtaskPayload {
             input: Vec::new(),
-            spawn_name: Cow::Borrowed("test"),
             task_id: SubtaskId {
                 stage: 0,
                 task: 0,
                 try_num: 0,
             },
             status_collector: status_collector.clone(),
-            spawner,
         };
 
         let task = tokio::task::spawn(run_subtask(
@@ -308,14 +300,12 @@ mod test {
 
         let payload = SubtaskPayload {
             input: Vec::new(),
-            spawn_name: Cow::Borrowed("test"),
             task_id: SubtaskId {
                 stage: 0,
                 task: 0,
                 try_num: 0,
             },
             status_collector: status_collector.clone(),
-            spawner,
         };
 
         let task = tokio::task::spawn(run_subtask(
@@ -360,14 +350,12 @@ mod test {
 
         let payload = SubtaskPayload {
             input: Vec::new(),
-            spawn_name: Cow::Borrowed("test"),
             task_id: SubtaskId {
                 stage: 0,
                 task: 0,
                 try_num: 0,
             },
             status_collector: status_collector.clone(),
-            spawner,
         };
 
         let task = tokio::task::spawn(run_subtask(
@@ -396,14 +384,12 @@ mod test {
 
         let payload = SubtaskPayload {
             input: Vec::new(),
-            spawn_name: Cow::Borrowed("test"),
             task_id: SubtaskId {
                 stage: 0,
                 task: 0,
                 try_num: 0,
             },
             status_collector: status_collector.clone(),
-            spawner,
         };
 
         let err = run_subtask(tracing::Span::current(), syncs, payload)
@@ -424,14 +410,12 @@ mod test {
 
         let payload = SubtaskPayload {
             input: Vec::new(),
-            spawn_name: Cow::Borrowed("test"),
             task_id: SubtaskId {
                 stage: 0,
                 task: 0,
                 try_num: 0,
             },
             status_collector: status_collector.clone(),
-            spawner,
         };
 
         let err = run_subtask(tracing::Span::current(), syncs, payload)

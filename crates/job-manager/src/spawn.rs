@@ -44,6 +44,8 @@ pub enum TaskError {
     TaskGenerationFailed,
     #[error("Retrying per tail task policy")]
     TailRetry,
+    #[error("Stage {0} failed")]
+    StageFailed(usize),
 }
 
 impl TaskError {
@@ -56,6 +58,7 @@ impl TaskError {
             Self::Failed(retryable) => *retryable,
             Self::TaskGenerationFailed => false,
             Self::TailRetry => false,
+            Self::StageFailed(_) => false,
         }
     }
 }
