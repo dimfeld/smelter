@@ -17,7 +17,7 @@ use tracing::instrument;
 use self::run_subtask::{SubtaskPayload, SubtaskSyncs};
 use crate::{
     scheduler::{SchedulerBehavior, SlowTaskBehavior},
-    spawn::TaskError,
+    spawn::{StageError, TaskError},
     task_status::{StatusCollector, StatusUpdateInput},
     SubTask, TaskDefWithOutput,
 };
@@ -76,7 +76,7 @@ pub struct Job {
     status_collector: StatusCollector,
     stage_task_tx: Sender<(usize, JoinHandle<Result<(), Report<TaskError>>>)>,
     num_stages: usize,
-    stage_monitor_task: JoinHandle<Result<(), Report<TaskError>>>,
+    stage_monitor_task: JoinHandle<Result<(), Report<StageError>>>,
 }
 
 impl Job {
@@ -102,7 +102,7 @@ impl Job {
     }
 
     /// Wait for the job to finish and return any errors.
-    pub async fn wait(self) -> Result<(), Report<TaskError>> {
+    pub async fn wait(self) -> Result<(), Report<StageError>> {
         match self.stage_monitor_task.await {
             Ok(e) => e,
             Err(e) => todo!("handle panic"),
@@ -125,7 +125,7 @@ impl Job {
     async fn monitor_job_stages(
         stage_task_rx: Receiver<(usize, JoinHandle<Result<(), Report<TaskError>>>)>,
         job_semaphore: Arc<Semaphore>,
-    ) -> Result<(), Report<TaskError>> {
+    ) -> Result<(), Report<StageError>> {
         let mut outstanding = FuturesUnordered::new();
 
         while !job_semaphore.is_closed() || !outstanding.is_empty() {
@@ -135,7 +135,7 @@ impl Job {
 
                     match result {
                         Ok(r) => {
-                            let result = r.change_context(TaskError::StageFailed(index));
+                            let result = r.change_context(StageError(index));
                             if result.is_err() {
                                 job_semaphore.close();
                                 return result;

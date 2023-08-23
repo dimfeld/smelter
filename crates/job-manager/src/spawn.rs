@@ -28,6 +28,10 @@ pub trait Spawner: Send + Sync + 'static {
     ) -> Result<Self::SpawnedTask, Report<TaskError>>;
 }
 
+#[derive(Debug, Error)]
+#[error("Stage {0} failed")]
+pub struct StageError(pub usize);
+
 #[derive(Clone, Error, Debug, PartialEq, Eq)]
 pub enum TaskError {
     #[error("Failed to start")]
@@ -44,8 +48,6 @@ pub enum TaskError {
     TaskGenerationFailed,
     #[error("Retrying per tail task policy")]
     TailRetry,
-    #[error("Stage {0} failed")]
-    StageFailed(usize),
 }
 
 impl TaskError {
@@ -58,7 +60,6 @@ impl TaskError {
             Self::Failed(retryable) => *retryable,
             Self::TaskGenerationFailed => false,
             Self::TailRetry => false,
-            Self::StageFailed(_) => false,
         }
     }
 }

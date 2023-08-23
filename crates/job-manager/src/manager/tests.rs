@@ -1,6 +1,7 @@
 use std::{borrow::Cow, sync::Arc, time::Duration};
 
 use async_trait::async_trait;
+use error_stack::Report;
 use thiserror::Error;
 use tracing::info;
 
@@ -8,9 +9,9 @@ use super::SubtaskId;
 use crate::{
     manager::JobManager,
     scheduler::{SchedulerBehavior, SlowTaskBehavior},
-    spawn::{fail_wrapper::FailingSpawner, inprocess::InProcessSpawner, TaskError},
+    spawn::{fail_wrapper::FailingSpawner, inprocess::InProcessSpawner, SpawnedTask, TaskError},
     task_status::{StatusCollector, StatusUpdateData},
-    SubTask, TaskDefWithOutput, TaskType,
+    SubTask, TaskDefWithOutput,
 };
 
 struct TestTask {
@@ -33,18 +34,21 @@ struct TestSubTaskDef {
 #[error("A test error")]
 struct TestError {}
 
+#[async_trait::async_trait]
 impl SubTask for TestSubTaskDef {
-    fn spawn_name(&self) -> std::borrow::Cow<'static, str> {
+    fn description(&self) -> std::borrow::Cow<'static, str> {
         Cow::from(self.spawn_name.clone())
     }
 
-    fn serialize_input(&self) -> Result<Vec<u8>, eyre::Report> {
+    async fn spawn(&self, task_id: SubtaskId) -> Result<Box<dyn SpawnedTask>, Report<TaskError>> {
         if self.fail_serialize {
             Err(eyre::eyre!("failed to serialize input"))
         } else {
             Ok(Vec::new())
         }
     }
+
+    fn read_task_response(data: Vec<u8>) -> Result<Self::Output, TaskError> {}
 }
 
 impl TestTask {
@@ -115,7 +119,6 @@ async fn normal_run() {
 
     let manager = JobManager::new(
         task_data,
-        spawner,
         SchedulerBehavior {
             max_concurrent_tasks: None,
             max_retries: 2,
@@ -147,7 +150,6 @@ async fn single_stage() {
 
     let manager = JobManager::new(
         task_data,
-        spawner,
         SchedulerBehavior {
             max_concurrent_tasks: None,
             max_retries: 2,
@@ -199,7 +201,6 @@ async fn tail_retry() {
 
     let manager = JobManager::new(
         task_data,
-        spawner,
         SchedulerBehavior {
             max_concurrent_tasks: None,
             max_retries: 2,
@@ -252,7 +253,6 @@ async fn retry_failures() {
 
     let manager = JobManager::new(
         task_data,
-        spawner,
         SchedulerBehavior {
             max_concurrent_tasks: None,
             max_retries: 2,
@@ -305,7 +305,6 @@ async fn permanent_failure_task_error() {
 
     let manager = JobManager::new(
         task_data,
-        spawner,
         SchedulerBehavior {
             max_concurrent_tasks: None,
             max_retries: 2,
@@ -367,7 +366,6 @@ async fn too_many_retries() {
 
     let manager = JobManager::new(
         task_data,
-        spawner,
         SchedulerBehavior {
             max_concurrent_tasks: None,
             max_retries: 2,
@@ -422,7 +420,6 @@ async fn task_panicked() {
 
     let manager = JobManager::new(
         task_data,
-        spawner,
         SchedulerBehavior {
             max_concurrent_tasks: None,
             max_retries: 2,
@@ -469,7 +466,6 @@ async fn task_payload_serialize_failure() {
 
     let manager = JobManager::new(
         task_data,
-        spawner,
         SchedulerBehavior {
             max_concurrent_tasks: None,
             max_retries: 2,
@@ -534,7 +530,6 @@ async fn max_concurrent_tasks() {
 
     let manager = JobManager::new(
         task_data,
-        spawner,
         SchedulerBehavior {
             max_concurrent_tasks: Some(2),
             max_retries: 2,
@@ -587,7 +582,6 @@ async fn wait_unordered() {
 
     let manager = JobManager::new(
         task_data,
-        spawner,
         SchedulerBehavior {
             max_concurrent_tasks: None,
             max_retries: 2,
