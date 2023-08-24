@@ -1,10 +1,8 @@
 use std::{borrow::Cow, fmt::Debug, sync::Arc, time::Duration};
 
-use async_trait::async_trait;
 use error_stack::{IntoReportCompat, Report, ResultExt};
-use futures::stream;
 use thiserror::Error;
-use tracing::info;
+use tracing::{event, info, Level};
 
 use super::{Job, SubtaskId};
 use crate::{
@@ -22,6 +20,7 @@ struct TestTask<SPAWNER: Spawner> {
     tasks_per_stage: usize,
     spawner: Arc<SPAWNER>,
     fail_serialize: Option<SubtaskId>,
+    expect_failure: bool,
 }
 
 pub(crate) struct TestSubTaskDef<SPAWNER: Spawner> {
@@ -43,7 +42,7 @@ impl<SPAWNER: Spawner> Clone for TestSubTaskDef<SPAWNER> {
     fn clone(&self) -> Self {
         Self {
             spawn_name: self.spawn_name.clone(),
-            fail_serialize: self.fail_serialize.clone(),
+            fail_serialize: self.fail_serialize,
             spawner: self.spawner.clone(),
         }
     }
@@ -104,10 +103,14 @@ impl<SPAWNER: Spawner> TestTask<SPAWNER> {
                         fail_serialize,
                     })
                     .await;
+                event!(Level::TRACE, %stage_index, %task_index, "Added subtask");
             }
+            drop(stage_tx);
 
             results = stage_rx.collect().await?;
-            assert_eq!(results.len(), self.tasks_per_stage);
+            if !self.expect_failure {
+                assert_eq!(results.len(), self.tasks_per_stage);
+            }
         }
 
         job.wait().await.change_context(TaskError::Failed(false))?;
@@ -119,6 +122,7 @@ impl<SPAWNER: Spawner> TestTask<SPAWNER> {
 #[tokio::test]
 async fn normal_run() {
     let spawner = Arc::new(InProcessSpawner::new(|info| async move {
+        event!(Level::INFO, task_id = %info.task_id, "ran task");
         Ok(format!("result {}", info.task_id))
     }));
 
@@ -127,6 +131,7 @@ async fn normal_run() {
         tasks_per_stage: 5,
         spawner,
         fail_serialize: None,
+        expect_failure: false,
     };
 
     let status = StatusCollector::new(10);
@@ -141,7 +146,6 @@ async fn normal_run() {
     );
 
     task.run(&manager).await.expect("Run succeeded");
-    // println!("{:?}", result);
 }
 
 #[tokio::test]
@@ -155,6 +159,7 @@ async fn single_stage() {
         tasks_per_stage: 5,
         spawner,
         fail_serialize: None,
+        expect_failure: false,
     };
 
     let status = StatusCollector::new(10);
@@ -209,6 +214,7 @@ async fn tail_retry() {
         tasks_per_stage: 5,
         spawner,
         fail_serialize: None,
+        expect_failure: false,
     };
 
     let status = StatusCollector::new(10);
@@ -262,6 +268,7 @@ async fn retry_failures() {
         tasks_per_stage: 5,
         spawner,
         fail_serialize: None,
+        expect_failure: false,
     };
 
     let status = StatusCollector::new(10);
@@ -315,6 +322,7 @@ async fn permanent_failure_task_error() {
         tasks_per_stage: 5,
         spawner,
         fail_serialize: None,
+        expect_failure: true,
     };
 
     let status = StatusCollector::new(10);
@@ -374,6 +382,7 @@ async fn too_many_retries() {
         tasks_per_stage: 5,
         spawner,
         fail_serialize: None,
+        expect_failure: true,
     };
 
     let status = StatusCollector::new(10);
@@ -426,6 +435,7 @@ async fn task_panicked() {
         tasks_per_stage: 5,
         spawner,
         fail_serialize: None,
+        expect_failure: false,
     };
 
     let status = StatusCollector::new(10);
@@ -477,6 +487,7 @@ async fn task_payload_serialize_failure() {
             task: 2,
             try_num: 0,
         }),
+        expect_failure: true,
     };
 
     let status = StatusCollector::new(10);
@@ -530,6 +541,7 @@ async fn max_concurrent_tasks() {
         tasks_per_stage: 5,
         spawner,
         fail_serialize: None,
+        expect_failure: false,
     };
 
     let status = StatusCollector::new(10);
@@ -580,6 +592,7 @@ async fn wait_unordered() {
         tasks_per_stage: 5,
         spawner,
         fail_serialize: None,
+        expect_failure: false,
     };
 
     let status = StatusCollector::new(10);
