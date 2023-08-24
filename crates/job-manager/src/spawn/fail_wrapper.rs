@@ -1,11 +1,10 @@
 use std::borrow::Cow;
 
 use async_trait::async_trait;
-use error_stack::{IntoReport, Report};
-
-use crate::manager::SubtaskId;
+use error_stack::Report;
 
 use super::{inprocess::InProcessTaskInfo, Spawner, TaskError};
+use crate::manager::SubtaskId;
 
 pub struct FailingSpawner<
     SPAWNER: Spawner,
@@ -45,7 +44,7 @@ impl<
             input_value: &input,
         };
 
-        (self.fail_func)(info).into_report()?;
+        (self.fail_func)(info)?;
 
         self.inner.spawn(task_id, task_name, input).await
     }

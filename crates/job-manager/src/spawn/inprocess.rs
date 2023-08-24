@@ -106,9 +106,8 @@ impl SpawnedTask for InProcessSpawnedTask {
         };
 
         result
-            .into_report()
             .change_context(TaskError::Failed(retryable))?
-            .into_report()
+            .map_err(Report::from)
     }
 }
 

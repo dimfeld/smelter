@@ -98,7 +98,7 @@ async fn run_subtask_internal<SUBTASK: SubTask>(
         _ = cancel.changed() => {
             task.kill().await.ok();
             status_collector.add(task_id, StatusUpdateData::Cancelled);
-            Err(TaskError::Cancelled).into_report()
+            Err(Report::new(TaskError::Cancelled))
         }
     }
 }

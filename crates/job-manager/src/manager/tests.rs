@@ -52,6 +52,10 @@ impl<SPAWNER: Spawner> Clone for TestSubTaskDef<SPAWNER> {
 #[error("A test error")]
 struct TestError {}
 
+#[derive(Error, Debug)]
+#[error("Failed to serialize input")]
+struct FailedSerializeError {}
+
 #[async_trait::async_trait]
 impl<SPAWNER: Spawner> SubTask for TestSubTaskDef<SPAWNER> {
     type Output = String;
@@ -62,9 +66,7 @@ impl<SPAWNER: Spawner> SubTask for TestSubTaskDef<SPAWNER> {
 
     async fn spawn(&self, task_id: SubtaskId) -> Result<Box<dyn SpawnedTask>, Report<TaskError>> {
         if self.fail_serialize {
-            Err(eyre::eyre!("failed to serialize input"))
-                .into_report()
-                .change_context(TaskError::TaskGenerationFailed)?;
+            Err(FailedSerializeError {}).change_context(TaskError::TaskGenerationFailed)?;
         }
 
         let task = self
