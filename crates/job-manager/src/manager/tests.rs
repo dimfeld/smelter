@@ -24,10 +24,10 @@ struct TestTask<SPAWNER: Spawner> {
     fail_serialize: Option<SubtaskId>,
 }
 
-struct TestSubTaskDef<SPAWNER: Spawner> {
-    spawn_name: String,
-    fail_serialize: bool,
-    spawner: Arc<SPAWNER>,
+pub(crate) struct TestSubTaskDef<SPAWNER: Spawner> {
+    pub spawn_name: String,
+    pub fail_serialize: bool,
+    pub spawner: Arc<SPAWNER>,
 }
 
 impl<SPAWNER: Spawner> Debug for TestSubTaskDef<SPAWNER> {
@@ -97,11 +97,13 @@ impl<SPAWNER: Spawner> TestTask<SPAWNER> {
                     .map(|id| id.stage == stage_index as u16 && id.task == task_index as u32)
                     .unwrap_or(false);
 
-                stage_tx.add_subtask(TestSubTaskDef {
-                    spawn_name: format!("test-{stage_index}-{task_index}"),
-                    spawner: self.spawner.clone(),
-                    fail_serialize,
-                });
+                stage_tx
+                    .add_subtask(TestSubTaskDef {
+                        spawn_name: format!("test-{stage_index}-{task_index}"),
+                        spawner: self.spawner.clone(),
+                        fail_serialize,
+                    })
+                    .await;
             }
 
             results = stage_rx.collect().await?;

@@ -1,4 +1,4 @@
-use std::{borrow::Cow, sync::Arc};
+use std::sync::Arc;
 
 use error_stack::{IntoReport, Report, ResultExt};
 use tokio::sync::Semaphore;
@@ -110,23 +110,35 @@ mod test {
     use tokio::time::timeout;
 
     use super::*;
-    use crate::spawn::{fail_wrapper::FailingSpawner, inprocess::InProcessSpawner, TaskError};
+    use crate::{
+        manager::tests::TestSubTaskDef,
+        spawn::{fail_wrapper::FailingSpawner, inprocess::InProcessSpawner, TaskError},
+    };
 
-    fn create_task_input() -> (
+    fn create_task_input<SPAWNER: Spawner>(
+        spawner: Arc<SPAWNER>,
+    ) -> (
+        TestSubTaskDef<SPAWNER>,
         StatusCollector,
         tokio::sync::watch::Sender<()>,
         Arc<SubtaskSyncs>,
     ) {
         let (cancel_tx, cancel_rx) = tokio::sync::watch::channel(());
         let syncs = Arc::new(SubtaskSyncs {
-            job_semaphore: Semaphore::new(1),
+            job_semaphore: Arc::new(Semaphore::new(1)),
             global_semaphore: None,
             cancel: cancel_rx,
         });
 
         let status_collector = StatusCollector::new(1);
 
-        (status_collector, cancel_tx, syncs)
+        let task = TestSubTaskDef {
+            spawn_name: "test".to_string(),
+            fail_serialize: false,
+            spawner,
+        };
+
+        (task, status_collector, cancel_tx, syncs)
     }
 
     #[tokio::test]
@@ -135,10 +147,10 @@ mod test {
             Ok(format!("result {}", info.task_id))
         }));
 
-        let (status_collector, _cancel_tx, syncs) = create_task_input();
+        let (input, status_collector, _cancel_tx, syncs) = create_task_input(spawner);
 
         let payload = SubtaskPayload {
-            input: Vec::new(),
+            input,
             status_collector: status_collector.clone(),
             task_id: SubtaskId {
                 stage: 0,
@@ -165,10 +177,10 @@ mod test {
             Ok::<_, TaskError>(format!("result {}", info.task_id))
         }));
 
-        let (status_collector, cancel_tx, syncs) = create_task_input();
+        let (input, status_collector, cancel_tx, syncs) = create_task_input(spawner);
 
         let payload = SubtaskPayload {
-            input: Vec::new(),
+            input,
             task_id: SubtaskId {
                 stage: 0,
                 task: 0,
@@ -200,10 +212,10 @@ mod test {
             Ok(format!("result {}", info.task_id))
         }));
 
-        let (status_collector, _cancel_tx, syncs) = create_task_input();
+        let (input, status_collector, _cancel_tx, syncs) = create_task_input(spawner);
 
         let global_semaphore = Arc::new(Semaphore::new(1));
-        let job_semaphore = Semaphore::new(1);
+        let job_semaphore = Arc::new(Semaphore::new(1));
 
         let syncs = Arc::new(SubtaskSyncs {
             global_semaphore: Some(global_semaphore),
@@ -225,7 +237,7 @@ mod test {
             .expect("job semaphore lock");
 
         let payload = SubtaskPayload {
-            input: Vec::new(),
+            input,
             task_id: SubtaskId {
                 stage: 0,
                 task: 0,
@@ -279,10 +291,10 @@ mod test {
             Ok(format!("result {}", info.task_id))
         }));
 
-        let (status_collector, _cancel_tx, syncs) = create_task_input();
+        let (input, status_collector, _cancel_tx, syncs) = create_task_input(spawner);
 
         let global_semaphore = Arc::new(Semaphore::new(1));
-        let job_semaphore = Semaphore::new(1);
+        let job_semaphore = Arc::new(Semaphore::new(1));
 
         let syncs = Arc::new(SubtaskSyncs {
             global_semaphore: Some(global_semaphore),
@@ -299,7 +311,7 @@ mod test {
             .expect("global semaphore lock");
 
         let payload = SubtaskPayload {
-            input: Vec::new(),
+            input,
             task_id: SubtaskId {
                 stage: 0,
                 task: 0,
@@ -331,10 +343,10 @@ mod test {
             Ok(format!("result {}", info.task_id))
         }));
 
-        let (status_collector, _cancel_tx, syncs) = create_task_input();
+        let (input, status_collector, _cancel_tx, syncs) = create_task_input(spawner);
 
         let global_semaphore = Arc::new(Semaphore::new(1));
-        let job_semaphore = Semaphore::new(1);
+        let job_semaphore = Arc::new(Semaphore::new(1));
 
         let syncs = Arc::new(SubtaskSyncs {
             global_semaphore: Some(global_semaphore),
@@ -349,7 +361,7 @@ mod test {
             .expect("job semaphore lock");
 
         let payload = SubtaskPayload {
-            input: Vec::new(),
+            input,
             task_id: SubtaskId {
                 stage: 0,
                 task: 0,
@@ -380,10 +392,10 @@ mod test {
         let spawner = Arc::new(InProcessSpawner::new(|_| async move {
             Err::<String, _>(TaskError::Failed(false))
         }));
-        let (status_collector, _cancel_tx, syncs) = create_task_input();
+        let (input, status_collector, _cancel_tx, syncs) = create_task_input(spawner);
 
         let payload = SubtaskPayload {
-            input: Vec::new(),
+            input,
             task_id: SubtaskId {
                 stage: 0,
                 task: 0,
@@ -406,10 +418,10 @@ mod test {
             |_| Err(TaskError::DidNotStart(true)),
         ));
 
-        let (status_collector, _cancel_tx, syncs) = create_task_input();
+        let (input, status_collector, _cancel_tx, syncs) = create_task_input(spawner);
 
         let payload = SubtaskPayload {
-            input: Vec::new(),
+            input,
             task_id: SubtaskId {
                 stage: 0,
                 task: 0,
