@@ -25,7 +25,7 @@ pub enum FailureType {
 }
 
 #[async_trait::async_trait]
-pub trait SubTask: Debug + Clone + Send + Sync + 'static {
+pub trait SubTask: Clone + Debug + Send + Sync + 'static {
     type Output: Debug + DeserializeOwned + Send + 'static;
 
     /// A name that describes the task.

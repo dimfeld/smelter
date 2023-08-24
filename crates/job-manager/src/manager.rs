@@ -2,10 +2,10 @@ mod run_subtask;
 #[cfg(test)]
 mod tests;
 
-use std::{fmt::Debug, marker::PhantomData, ops::Deref, sync::Arc};
+use std::{fmt::Debug, sync::Arc};
 
 use ahash::HashMap;
-use error_stack::{IntoReport, IntoReportCompat, Report, ResultExt};
+use error_stack::{Report, ResultExt};
 use flume::{Receiver, Sender};
 use futures::{stream::FuturesUnordered, FutureExt, StreamExt};
 use tokio::{
@@ -18,7 +18,7 @@ use self::run_subtask::{SubtaskPayload, SubtaskSyncs};
 use crate::{
     scheduler::{SchedulerBehavior, SlowTaskBehavior},
     spawn::{StageError, TaskError},
-    task_status::{StatusCollector, StatusUpdateInput},
+    task_status::{StatusCollector, StatusUpdateData},
     SubTask, TaskDefWithOutput,
 };
 
@@ -110,16 +110,50 @@ impl Job {
     }
 
     #[instrument(skip(self))]
-    pub async fn add_stage<SUBTASK: SubTask>(&mut self) -> JobStage<SUBTASK> {
+    pub async fn add_stage<SUBTASK: SubTask>(
+        &mut self,
+    ) -> (JobStageTaskSender<SUBTASK>, JobStageResultReceiver<SUBTASK>) {
         let stage_index = self.num_stages;
         self.num_stages += 1;
 
-        let (job_stage, stage_task) = JobStage::new(stage_index, self);
+        let (subtask_result_tx, subtask_result_rx) = flume::unbounded();
+        let (new_task_tx, new_task_rx) = flume::unbounded();
+
+        let stage_task = tokio::task::spawn(run_tasks_stage(
+            stage_index,
+            new_task_rx,
+            subtask_result_tx,
+            self.scheduler.clone(),
+            self.status_collector.clone(),
+            self.job_semaphore.clone(),
+            self.global_semaphore.clone(),
+        ));
+
+        let tx = JobStageTaskSender {
+            tx: new_task_tx,
+            stage: stage_index,
+        };
+
+        let rx = JobStageResultReceiver {
+            rx: subtask_result_rx,
+        };
+
         self.stage_task_tx
             .send_async((stage_index, stage_task))
             .await
             .ok();
-        job_stage
+        (tx, rx)
+    }
+
+    pub async fn add_stage_from_iter<SUBTASK: SubTask>(
+        &mut self,
+        tasks: impl IntoIterator<Item = SUBTASK>,
+    ) -> JobStageResultReceiver<SUBTASK> {
+        let (tx, rx) = self.add_stage().await;
+        for task in tasks {
+            tx.add_subtask(task).await;
+        }
+        rx
     }
 
     async fn monitor_job_stages(
@@ -161,64 +195,50 @@ impl Job {
     }
 }
 
-struct JobStageData<SUBTASK: SubTask> {
-    pub subtask_result: Receiver<TaskDefWithOutput<SUBTASK>>,
-    stage_index: usize,
-    new_task_tx: Option<Sender<SUBTASK>>,
-}
-
-/// One stage of a job. This type can be cheaply Cloned to use it from multiple places. Say,
+/// A channel that can send new tasks into a job stage. This type can be cheaply Cloned to use it from multiple places. Say,
 /// consuming finished tasks from the stage and adding new jobs to it concurrently from different
 /// places.
 #[derive(Clone)]
-pub struct JobStage<SUBTASK: SubTask>(Arc<JobStageData<SUBTASK>>);
+pub struct JobStageTaskSender<SUBTASK: SubTask> {
+    tx: Sender<SUBTASK>,
+    stage: usize,
+}
 
-impl<SUBTASK: SubTask> JobStage<SUBTASK> {
-    fn new(
-        stage_index: usize,
-        job: &Job,
-    ) -> (JobStage<SUBTASK>, JoinHandle<Result<(), Report<TaskError>>>) {
-        let (subtask_result_tx, subtask_result_rx) = flume::unbounded();
-        let (new_task_tx, new_task_rx) = flume::unbounded();
-
-        let stage_task = tokio::task::spawn(run_tasks_stage(
-            stage_index,
-            new_task_rx,
-            subtask_result_tx,
-            job.scheduler.clone(),
-            job.status_collector.clone(),
-            job.job_semaphore.clone(),
-            job.global_semaphore.clone(),
-        ));
-
-        let data = JobStageData {
-            stage_index,
-            subtask_result: subtask_result_rx,
-            new_task_tx: Some(new_task_tx),
-        };
-
-        (JobStage(Arc::new(data)), stage_task)
+impl<SUBTASK: SubTask> Debug for JobStageTaskSender<SUBTASK> {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("JobStageTaskSender")
+            .field("stage", &self.stage)
+            .finish()
     }
 }
 
-impl<SUBTASK: SubTask> JobStageData<SUBTASK> {
-    pub async fn add_subtask(&mut self, task: SUBTASK) {
-        let Some(new_task_tx) = self.new_task_tx.as_ref() else {
-            panic!(
-                "Tried to add new subtask to stage {} after it had closed",
-                self.stage_index
-            );
-        };
+pub struct JobStageResultReceiver<SUBTASK: SubTask> {
+    rx: Receiver<Result<TaskDefWithOutput<SUBTASK>, Report<TaskError>>>,
+}
 
-        new_task_tx.send_async(task).await.ok();
+impl<SUBTASK: SubTask> JobStageTaskSender<SUBTASK> {
+    pub async fn add_subtask(&self, task: SUBTASK) {
+        self.tx.send_async(task).await.ok();
     }
 
-    pub fn finish(&mut self) {
-        self.new_task_tx.take();
+    pub async fn extend(&mut self, tasks: impl IntoIterator<Item = SUBTASK>) {
+        for task in tasks {
+            self.add_subtask(task).await;
+        }
     }
+}
 
+impl<SUBTASK: SubTask> JobStageResultReceiver<SUBTASK> {
     pub fn is_finished(&self) -> bool {
-        self.subtask_result.is_disconnected() && self.subtask_result.is_empty()
+        self.rx.is_disconnected() && self.rx.is_empty()
+    }
+
+    pub async fn collect(self) -> Result<Vec<TaskDefWithOutput<SUBTASK>>, Report<TaskError>> {
+        let mut output = Vec::new();
+        for result in self.rx {
+            output.push(result?);
+        }
+        Ok(output)
     }
 }
 
@@ -239,7 +259,7 @@ fn ready_for_tail_retry(
 async fn run_tasks_stage<SUBTASK: SubTask>(
     stage_index: usize,
     new_task_rx: Receiver<SUBTASK>,
-    subtask_result_tx: Sender<TaskDefWithOutput<SUBTASK>>,
+    subtask_result_tx: Sender<Result<TaskDefWithOutput<SUBTASK>, Report<TaskError>>>,
     scheduler: SchedulerBehavior,
     status_collector: StatusCollector,
     job_semaphore: Arc<Semaphore>,
@@ -251,7 +271,6 @@ async fn run_tasks_stage<SUBTASK: SubTask>(
     // We never transmit anything on cancel_tx, but let it drop at the end of the function to
     // cancel any tasks still running.
     let (_cancel_tx, cancel_rx) = tokio::sync::watch::channel(());
-    let mut failed = false;
 
     let syncs = Arc::new(SubtaskSyncs {
         job_semaphore: job_semaphore.clone(),
@@ -260,11 +279,7 @@ async fn run_tasks_stage<SUBTASK: SubTask>(
     });
 
     let mut running_tasks = FuturesUnordered::new();
-    let spawn_task = |i: usize,
-                      try_num: u16,
-                      task: SUBTASK,
-                      futures: &mut FuturesUnordered<_>,
-                      failed: &mut bool| {
+    let spawn_task = |i: usize, try_num: u16, task: SUBTASK, futures: &mut FuturesUnordered<_>| {
         let task_id = SubtaskId {
             stage: stage_index as u16,
             task: i as u32,
@@ -290,35 +305,33 @@ async fn run_tasks_stage<SUBTASK: SubTask>(
     let mut performed_tail_retry = false;
     let mut no_more_new_tasks = false;
 
-    let mut retry_or_fail =
-        |failed: &mut bool,
-         futures: &mut FuturesUnordered<_>,
-         e: Report<TaskError>,
-         task_index: usize,
-         task_info: &mut TaskTrackingInfo<SUBTASK>| {
-            let task_id = SubtaskId {
-                stage: stage_index as u16,
-                task: task_index as u32,
-                try_num: task_info.try_num as u16,
-            };
-
-            if e.current_context().retryable() && task_info.try_num < scheduler.max_retries {
-                status_collector.add(task_id, StatusUpdateInput::Retry(e));
-                task_info.try_num += 1;
-                spawn_task(
-                    task_index,
-                    task_info.try_num as u16,
-                    task_info.input.clone(),
-                    futures,
-                    failed,
-                );
-            } else {
-                status_collector.add(task_id, StatusUpdateInput::Failed(e));
-                *failed = true;
-            }
+    let retry_or_fail = |futures: &mut FuturesUnordered<_>,
+                         e: Report<TaskError>,
+                         task_index: usize,
+                         task_info: &mut TaskTrackingInfo<SUBTASK>| {
+        let task_id = SubtaskId {
+            stage: stage_index as u16,
+            task: task_index as u32,
+            try_num: task_info.try_num as u16,
         };
 
-    while !failed && (!unfinished.is_empty() || !new_task_rx.is_disconnected()) {
+        if e.current_context().retryable() && task_info.try_num < scheduler.max_retries {
+            status_collector.add(task_id, StatusUpdateData::Retry(format!("{e:?}")));
+            task_info.try_num += 1;
+            spawn_task(
+                task_index,
+                task_info.try_num as u16,
+                task_info.input.clone(),
+                futures,
+            );
+            Ok(())
+        } else {
+            status_collector.add(task_id, StatusUpdateData::Failed(format!("{e:?}")));
+            Err(e)
+        }
+    };
+
+    while !unfinished.is_empty() || !new_task_rx.is_disconnected() {
         tokio::select! {
             new_task = new_task_rx.recv_async(), if !no_more_new_tasks => {
                 match new_task {
@@ -327,7 +340,7 @@ async fn run_tasks_stage<SUBTASK: SubTask>(
                             try_num: 0,
                             input: new_task.clone(),
                         });
-                        spawn_task(total_num_tasks, 0, new_task, &mut running_tasks, &mut failed);
+                        spawn_task(total_num_tasks, 0, new_task, &mut running_tasks);
                         total_num_tasks += 1;
                     }
                     Err(_) => no_more_new_tasks = true,
@@ -355,13 +368,14 @@ async fn run_tasks_stage<SUBTASK: SubTask>(
                             let output = SUBTASK::read_task_response(output.output);
                             match output {
                                 Err(e) => {
+                                    let e = Report::new(e).change_context(TaskError::Failed(true));
                                     retry_or_fail(
-                                        &mut failed,
                                         &mut running_tasks,
-                                        Report::new(e).change_context(TaskError::Failed(true)),
+                                        e,
                                         task_index,
                                         &mut task_info,
-                                    );
+                                    )?;
+
                                     // Deserialization failed, so put it back.
                                     unfinished.insert(task_index, task_info);
                                 }
@@ -370,7 +384,7 @@ async fn run_tasks_stage<SUBTASK: SubTask>(
                                         task_def: task_info.input,
                                         output,
                                     };
-                                    subtask_result_tx.send_async(output).await.ok();
+                                    subtask_result_tx.send_async(Ok(output)).await.ok();
 
                                     if !performed_tail_retry && no_more_new_tasks
                                         && ready_for_tail_retry(&scheduler, unfinished.len(), total_num_tasks)
@@ -386,13 +400,13 @@ async fn run_tasks_stage<SUBTASK: SubTask>(
                                                     task: *i as u32,
                                                     try_num: task.try_num as u16,
                                                 },
-                                                StatusUpdateInput::Retry(Report::new(
+                                                StatusUpdateData::Retry(format!("{:?}", Report::new(
                                                     TaskError::TailRetry,
-                                                )),
+                                                ))),
                                             );
 
                                             task.try_num += 1;
-                                            spawn_task(*i, task.try_num as u16, task.input.clone(), &mut running_tasks, &mut failed);
+                                            spawn_task(*i, task.try_num as u16, task.input.clone(), &mut running_tasks);
                                         }
                                     }
                                 }
@@ -402,7 +416,7 @@ async fn run_tasks_stage<SUBTASK: SubTask>(
                     // Task finished with an error.
                     Ok(Some(Err(e))) => {
                         if let Some(task_info) = unfinished.get_mut(&task_index) {
-                            retry_or_fail(&mut failed, &mut running_tasks, e, task_index, task_info);
+                            retry_or_fail(&mut running_tasks, e, task_index, task_info)?;
                         }
                     }
                     // Task panicked. We can't really decipher the error so always consider it
@@ -410,7 +424,7 @@ async fn run_tasks_stage<SUBTASK: SubTask>(
                     Err(e) => {
                         if let Some(task_info) = unfinished.get_mut(&task_index) {
                             let e = Report::new(e).change_context(TaskError::Failed(true));
-                            retry_or_fail(&mut failed, &mut running_tasks, e, task_index, task_info);
+                            retry_or_fail(&mut running_tasks, e, task_index, task_info)?;
                         }
                     }
                 }
@@ -427,9 +441,5 @@ async fn run_tasks_stage<SUBTASK: SubTask>(
         }
     }
 
-    if failed {
-        Err(TaskError::Failed(false)).into_report()
-    } else {
-        Ok(())
-    }
+    Ok(())
 }

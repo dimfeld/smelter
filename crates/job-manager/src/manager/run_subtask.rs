@@ -8,7 +8,7 @@ use super::SubtaskId;
 use crate::{
     spawn::{SpawnedTask, Spawner, TaskError},
     task_status::{
-        StatusCollector, StatusUpdateInput, StatusUpdateSpawnedData, StatusUpdateSuccessData,
+        StatusCollector, StatusUpdateData, StatusUpdateSpawnedData, StatusUpdateSuccessData,
     },
     SubTask,
 };
@@ -78,7 +78,7 @@ async fn run_subtask_internal<SUBTASK: SubTask>(
     let runtime_id = task.runtime_id().await?;
     status_collector.add(
         task_id,
-        StatusUpdateInput::Spawned(StatusUpdateSpawnedData {
+        StatusUpdateData::Spawned(StatusUpdateSpawnedData {
             runtime_id: runtime_id.clone(),
         }),
     );
@@ -86,7 +86,7 @@ async fn run_subtask_internal<SUBTASK: SubTask>(
     tokio::select! {
         res = task.wait() => {
             let res = res.attach_printable_lazy(|| format!("Job {task_id} Runtime ID {runtime_id}"))?;
-            status_collector.add(task_id, StatusUpdateInput::Success(
+            status_collector.add(task_id, StatusUpdateData::Success(
                     StatusUpdateSuccessData {
                         output: res.clone(),
                     }
@@ -97,7 +97,7 @@ async fn run_subtask_internal<SUBTASK: SubTask>(
 
         _ = cancel.changed() => {
             task.kill().await.ok();
-            status_collector.add(task_id, StatusUpdateInput::Cancelled);
+            status_collector.add(task_id, StatusUpdateData::Cancelled);
             Err(TaskError::Cancelled).into_report()
         }
     }
