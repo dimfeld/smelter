@@ -22,10 +22,14 @@ use crate::{
     SubTask, TaskDefWithOutput,
 };
 
+/// The ID for a subtask, which uniquely identifies it within a [Job].
 #[derive(Debug, Copy, Clone)]
 pub struct SubtaskId {
+    /// Which stage the subtask is running on.
     pub stage: u16,
+    /// The index of the task within that stage.
     pub task: u32,
+    /// Which retry of this task is being executed.
     pub try_num: u16,
 }
 
@@ -35,12 +39,14 @@ impl std::fmt::Display for SubtaskId {
     }
 }
 
+/// Information to run a task as well as which retry we're on.
 #[derive(Debug)]
 struct TaskTrackingInfo<INPUT: Debug> {
     input: INPUT,
     try_num: usize,
 }
 
+/// The [JobManager] holds state and behavior that is shared between multiple jobs.
 pub struct JobManager {
     scheduler: SchedulerBehavior,
     global_semaphore: Option<Arc<Semaphore>>,
@@ -48,6 +54,11 @@ pub struct JobManager {
 }
 
 impl JobManager {
+    /// Create a new [JobManager]
+    /// * scheduler - How subtasks should be scheduled within a job
+    /// * status_collector - A collector of job and subtask status information.
+    /// * global_semaphore - If supplied, the `global_semaphore` will limit the number of jobs that are running
+    ///   concurrently.
     pub fn new(
         scheduler: SchedulerBehavior,
         status_collector: StatusCollector,
@@ -60,15 +71,18 @@ impl JobManager {
         }
     }
 
+    /// Create a new job with custom scheduler behavior.
     pub fn new_job_with_scheduler(&self, scheduler: SchedulerBehavior) -> Job {
         Job::new(self, scheduler)
     }
 
+    /// Craete a new job.
     pub fn new_job(&self) -> Job {
         self.new_job_with_scheduler(self.scheduler.clone())
     }
 }
 
+/// A job in the system.
 pub struct Job {
     scheduler: SchedulerBehavior,
     job_semaphore: Arc<Semaphore>,
@@ -81,6 +95,7 @@ pub struct Job {
 }
 
 impl Job {
+    /// Create a new job. This is internal and called from the job manager.
     fn new(manager: &JobManager, scheduler: SchedulerBehavior) -> Job {
         let max_concurrent_tasks = scheduler.max_concurrent_tasks.unwrap_or(i32::MAX as usize);
         let job_semaphore = Arc::new(Semaphore::new(max_concurrent_tasks));
@@ -120,6 +135,7 @@ impl Job {
         }
     }
 
+    /// Create a new stage in the job, which is a set of linked subtasks.
     pub async fn add_stage<SUBTASK: SubTask>(
         &mut self,
     ) -> (JobStageTaskSender<SUBTASK>, JobStageResultReceiver<SUBTASK>) {
@@ -157,6 +173,7 @@ impl Job {
         (tx, rx)
     }
 
+    /// Create a new stage and add a fixed set of tasks to it.
     pub async fn add_stage_from_iter<SUBTASK: SubTask>(
         &mut self,
         tasks: impl IntoIterator<Item = SUBTASK>,
@@ -233,10 +250,12 @@ impl Drop for Job {
 
 /// A channel that can send new tasks into a job stage. This type can be cheaply Cloned to use it from multiple places. Say,
 /// consuming finished tasks from the stage and adding new jobs to it concurrently from different
-/// places. Drop this object to signify that no more tasks will be added to the stage.
+/// places. Drop this object or call [JobStageTaskSender::finish] to signify that no more tasks will be added to the stage.
 #[derive(Clone)]
 pub struct JobStageTaskSender<SUBTASK: SubTask> {
+    /// The channel on which new subtasks are sent.
     tx: Sender<SUBTASK>,
+    /// The stage index.
     stage: usize,
 }
 
@@ -249,21 +268,29 @@ impl<SUBTASK: SubTask> Debug for JobStageTaskSender<SUBTASK> {
 }
 
 impl<SUBTASK: SubTask> JobStageTaskSender<SUBTASK> {
+    /// Add a subtask to the stage.
     #[instrument(level = "debug")]
     pub async fn add_subtask(&self, task: SUBTASK) {
         self.tx.send_async(task).await.ok();
     }
 
+    /// Add multiple subtasks to the stage.
     #[instrument(level = "debug")]
     pub async fn extend(&mut self, tasks: impl IntoIterator<Item = SUBTASK> + Debug) {
         for task in tasks {
             self.add_subtask(task).await;
         }
     }
+
+    /// Finish sending tasks. This is equivalent to just dropping the sender.
+    pub fn finish(self) {}
 }
 
+/// Receive the results of finished tasks for a stage.
 pub struct JobStageResultReceiver<SUBTASK: SubTask> {
+    /// The channel on which task results are sent.
     rx: Receiver<Result<TaskDefWithOutput<SUBTASK>, Report<TaskError>>>,
+    /// The stage index.
     stage: usize,
 }
 
@@ -276,6 +303,7 @@ impl<SUBTASK: SubTask> Debug for JobStageResultReceiver<SUBTASK> {
 }
 
 impl<SUBTASK: SubTask> JobStageResultReceiver<SUBTASK> {
+    /// Return true if all the jobs in this stage have finished, and there will be no more jobs.
     pub fn is_finished(&self) -> bool {
         self.rx.is_disconnected() && self.rx.is_empty()
     }

@@ -1,3 +1,8 @@
+// #![warn(missing_docs)]
+// #![warn(clippy::missing_docs_in_private_items)]
+
+//! Manage and run jobs for Smelter
+
 use std::{borrow::Cow, fmt::Debug};
 
 use error_stack::Report;
@@ -12,20 +17,19 @@ pub mod task_status;
 #[cfg(test)]
 mod test_util;
 
+/// A task definition, along with the output that resulted from running it.
 #[derive(Debug)]
 pub struct TaskDefWithOutput<DEF: SubTask> {
+    /// The task definition.
     pub task_def: DEF,
+    /// The output of running the task.
     pub output: DEF::Output,
 }
 
-pub enum FailureType {
-    DoNotRetry,
-    RetryNow,
-    RetryAfter { ms: usize },
-}
-
+/// A definition of a subtask.
 #[async_trait::async_trait]
 pub trait SubTask: Clone + Debug + Send + Sync + 'static {
+    /// The type of output produced by this task.
     type Output: Debug + DeserializeOwned + Send + 'static;
 
     /// A name that describes the task.
@@ -34,5 +38,6 @@ pub trait SubTask: Clone + Debug + Send + Sync + 'static {
     /// Start the task with the appropriate arguments.
     async fn spawn(&self, task_id: SubtaskId) -> Result<Box<dyn SpawnedTask>, Report<TaskError>>;
 
+    /// Deserialize the task's result.
     fn read_task_response(data: Vec<u8>) -> Result<Self::Output, TaskError>;
 }
