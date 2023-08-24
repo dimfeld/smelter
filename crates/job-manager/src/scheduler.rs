@@ -1,3 +1,4 @@
+#[derive(Debug, Clone)]
 pub struct SchedulerBehavior {
     /// The maximum number of tasks to run at once. Leave this as `None` to run them as fast as
     /// possible, leaving the limits to the underlying task runtime.
@@ -7,6 +8,7 @@ pub struct SchedulerBehavior {
     pub slow_task_behavior: SlowTaskBehavior,
 }
 
+#[derive(Debug, Clone)]
 pub enum SlowTaskBehavior {
     /// Just wait for slow tasks to finish.
     Wait,

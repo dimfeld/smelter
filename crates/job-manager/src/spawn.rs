@@ -28,6 +28,10 @@ pub trait Spawner: Send + Sync + 'static {
     ) -> Result<Self::SpawnedTask, Report<TaskError>>;
 }
 
+#[derive(Debug, Error)]
+#[error("Stage {0} failed")]
+pub struct StageError(pub usize);
+
 #[derive(Clone, Error, Debug, PartialEq, Eq)]
 pub enum TaskError {
     #[error("Failed to start")]

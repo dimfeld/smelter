@@ -1,4 +1,4 @@
-use std::{borrow::Cow, sync::Arc};
+use std::sync::Arc;
 
 use error_stack::{IntoReport, Report, ResultExt};
 use tokio::sync::Semaphore;
@@ -8,8 +8,9 @@ use super::SubtaskId;
 use crate::{
     spawn::{SpawnedTask, Spawner, TaskError},
     task_status::{
-        StatusCollector, StatusUpdateInput, StatusUpdateSpawnedData, StatusUpdateSuccessData,
+        StatusCollector, StatusUpdateData, StatusUpdateSpawnedData, StatusUpdateSuccessData,
     },
+    SubTask,
 };
 
 pub(super) type SubtaskResult = Result<SubtaskOutput, Report<TaskError>>;
@@ -19,25 +20,23 @@ pub struct SubtaskOutput {
     pub output: Vec<u8>,
 }
 
-pub(super) struct SubtaskPayload<SPAWNER: Spawner> {
-    pub input: Vec<u8>,
-    pub spawn_name: Cow<'static, str>,
+pub(super) struct SubtaskPayload<SUBTASK: SubTask> {
+    pub input: SUBTASK,
     pub task_id: SubtaskId,
     pub status_collector: StatusCollector,
-    pub spawner: Arc<SPAWNER>,
 }
 
 pub(super) struct SubtaskSyncs {
     pub global_semaphore: Option<Arc<Semaphore>>,
-    pub job_semaphore: Semaphore,
+    pub job_semaphore: Arc<Semaphore>,
     pub cancel: tokio::sync::watch::Receiver<()>,
 }
 
 #[instrument(level=Level::DEBUG, ret, parent=&parent_span, skip(syncs, parent_span, payload), fields(task_id = ?payload.task_id))]
-pub(super) async fn run_subtask<SPAWNER: Spawner>(
+pub(super) async fn run_subtask<SUBTASK: SubTask>(
     parent_span: tracing::Span,
     syncs: Arc<SubtaskSyncs>,
-    payload: SubtaskPayload<SPAWNER>,
+    payload: SubtaskPayload<SUBTASK>,
 ) -> Option<SubtaskResult> {
     let SubtaskSyncs {
         global_semaphore,
@@ -65,23 +64,21 @@ pub(super) async fn run_subtask<SPAWNER: Spawner>(
 }
 
 #[instrument(level=Level::TRACE, skip(cancel, payload), fields(task_id = %payload.task_id))]
-async fn run_subtask_internal<SPAWNER: Spawner>(
+async fn run_subtask_internal<SUBTASK: SubTask>(
     mut cancel: tokio::sync::watch::Receiver<()>,
-    payload: SubtaskPayload<SPAWNER>,
+    payload: SubtaskPayload<SUBTASK>,
 ) -> SubtaskResult {
     let SubtaskPayload {
         input,
-        spawn_name,
         task_id,
         status_collector,
-        spawner,
     } = payload;
 
-    let mut task = spawner.spawn(task_id, spawn_name, input).await?;
+    let mut task = input.spawn(task_id).await?;
     let runtime_id = task.runtime_id().await?;
     status_collector.add(
         task_id,
-        StatusUpdateInput::Spawned(StatusUpdateSpawnedData {
+        StatusUpdateData::Spawned(StatusUpdateSpawnedData {
             runtime_id: runtime_id.clone(),
         }),
     );
@@ -89,7 +86,7 @@ async fn run_subtask_internal<SPAWNER: Spawner>(
     tokio::select! {
         res = task.wait() => {
             let res = res.attach_printable_lazy(|| format!("Job {task_id} Runtime ID {runtime_id}"))?;
-            status_collector.add(task_id, StatusUpdateInput::Success(
+            status_collector.add(task_id, StatusUpdateData::Success(
                     StatusUpdateSuccessData {
                         output: res.clone(),
                     }
@@ -100,7 +97,7 @@ async fn run_subtask_internal<SPAWNER: Spawner>(
 
         _ = cancel.changed() => {
             task.kill().await.ok();
-            status_collector.add(task_id, StatusUpdateInput::Cancelled);
+            status_collector.add(task_id, StatusUpdateData::Cancelled);
             Err(TaskError::Cancelled).into_report()
         }
     }
@@ -113,23 +110,35 @@ mod test {
     use tokio::time::timeout;
 
     use super::*;
-    use crate::spawn::{fail_wrapper::FailingSpawner, inprocess::InProcessSpawner, TaskError};
+    use crate::{
+        manager::tests::TestSubTaskDef,
+        spawn::{fail_wrapper::FailingSpawner, inprocess::InProcessSpawner, TaskError},
+    };
 
-    fn create_task_input() -> (
+    fn create_task_input<SPAWNER: Spawner>(
+        spawner: Arc<SPAWNER>,
+    ) -> (
+        TestSubTaskDef<SPAWNER>,
         StatusCollector,
         tokio::sync::watch::Sender<()>,
         Arc<SubtaskSyncs>,
     ) {
         let (cancel_tx, cancel_rx) = tokio::sync::watch::channel(());
         let syncs = Arc::new(SubtaskSyncs {
-            job_semaphore: Semaphore::new(1),
+            job_semaphore: Arc::new(Semaphore::new(1)),
             global_semaphore: None,
             cancel: cancel_rx,
         });
 
         let status_collector = StatusCollector::new(1);
 
-        (status_collector, cancel_tx, syncs)
+        let task = TestSubTaskDef {
+            spawn_name: "test".to_string(),
+            fail_serialize: false,
+            spawner,
+        };
+
+        (task, status_collector, cancel_tx, syncs)
     }
 
     #[tokio::test]
@@ -138,18 +147,16 @@ mod test {
             Ok(format!("result {}", info.task_id))
         }));
 
-        let (status_collector, _cancel_tx, syncs) = create_task_input();
+        let (input, status_collector, _cancel_tx, syncs) = create_task_input(spawner);
 
         let payload = SubtaskPayload {
-            input: Vec::new(),
-            spawn_name: Cow::Borrowed("test"),
+            input,
             status_collector: status_collector.clone(),
             task_id: SubtaskId {
                 stage: 0,
                 task: 0,
                 try_num: 0,
             },
-            spawner,
         };
 
         let result = run_subtask(tracing::Span::current(), syncs, payload)
@@ -170,18 +177,16 @@ mod test {
             Ok::<_, TaskError>(format!("result {}", info.task_id))
         }));
 
-        let (status_collector, cancel_tx, syncs) = create_task_input();
+        let (input, status_collector, cancel_tx, syncs) = create_task_input(spawner);
 
         let payload = SubtaskPayload {
-            input: Vec::new(),
-            spawn_name: Cow::Borrowed("test"),
+            input,
             task_id: SubtaskId {
                 stage: 0,
                 task: 0,
                 try_num: 0,
             },
             status_collector: status_collector.clone(),
-            spawner,
         };
 
         let task = tokio::task::spawn(run_subtask(tracing::Span::current(), syncs, payload));
@@ -207,10 +212,10 @@ mod test {
             Ok(format!("result {}", info.task_id))
         }));
 
-        let (status_collector, _cancel_tx, syncs) = create_task_input();
+        let (input, status_collector, _cancel_tx, syncs) = create_task_input(spawner);
 
         let global_semaphore = Arc::new(Semaphore::new(1));
-        let job_semaphore = Semaphore::new(1);
+        let job_semaphore = Arc::new(Semaphore::new(1));
 
         let syncs = Arc::new(SubtaskSyncs {
             global_semaphore: Some(global_semaphore),
@@ -232,15 +237,13 @@ mod test {
             .expect("job semaphore lock");
 
         let payload = SubtaskPayload {
-            input: Vec::new(),
-            spawn_name: Cow::Borrowed("test"),
+            input,
             task_id: SubtaskId {
                 stage: 0,
                 task: 0,
                 try_num: 0,
             },
             status_collector: status_collector.clone(),
-            spawner,
         };
 
         let task = tokio::task::spawn(run_subtask(
@@ -288,10 +291,10 @@ mod test {
             Ok(format!("result {}", info.task_id))
         }));
 
-        let (status_collector, _cancel_tx, syncs) = create_task_input();
+        let (input, status_collector, _cancel_tx, syncs) = create_task_input(spawner);
 
         let global_semaphore = Arc::new(Semaphore::new(1));
-        let job_semaphore = Semaphore::new(1);
+        let job_semaphore = Arc::new(Semaphore::new(1));
 
         let syncs = Arc::new(SubtaskSyncs {
             global_semaphore: Some(global_semaphore),
@@ -308,15 +311,13 @@ mod test {
             .expect("global semaphore lock");
 
         let payload = SubtaskPayload {
-            input: Vec::new(),
-            spawn_name: Cow::Borrowed("test"),
+            input,
             task_id: SubtaskId {
                 stage: 0,
                 task: 0,
                 try_num: 0,
             },
             status_collector: status_collector.clone(),
-            spawner,
         };
 
         let task = tokio::task::spawn(run_subtask(
@@ -342,10 +343,10 @@ mod test {
             Ok(format!("result {}", info.task_id))
         }));
 
-        let (status_collector, _cancel_tx, syncs) = create_task_input();
+        let (input, status_collector, _cancel_tx, syncs) = create_task_input(spawner);
 
         let global_semaphore = Arc::new(Semaphore::new(1));
-        let job_semaphore = Semaphore::new(1);
+        let job_semaphore = Arc::new(Semaphore::new(1));
 
         let syncs = Arc::new(SubtaskSyncs {
             global_semaphore: Some(global_semaphore),
@@ -360,15 +361,13 @@ mod test {
             .expect("job semaphore lock");
 
         let payload = SubtaskPayload {
-            input: Vec::new(),
-            spawn_name: Cow::Borrowed("test"),
+            input,
             task_id: SubtaskId {
                 stage: 0,
                 task: 0,
                 try_num: 0,
             },
             status_collector: status_collector.clone(),
-            spawner,
         };
 
         let task = tokio::task::spawn(run_subtask(
@@ -393,18 +392,16 @@ mod test {
         let spawner = Arc::new(InProcessSpawner::new(|_| async move {
             Err::<String, _>(TaskError::Failed(false))
         }));
-        let (status_collector, _cancel_tx, syncs) = create_task_input();
+        let (input, status_collector, _cancel_tx, syncs) = create_task_input(spawner);
 
         let payload = SubtaskPayload {
-            input: Vec::new(),
-            spawn_name: Cow::Borrowed("test"),
+            input,
             task_id: SubtaskId {
                 stage: 0,
                 task: 0,
                 try_num: 0,
             },
             status_collector: status_collector.clone(),
-            spawner,
         };
 
         let err = run_subtask(tracing::Span::current(), syncs, payload)
@@ -421,18 +418,16 @@ mod test {
             |_| Err(TaskError::DidNotStart(true)),
         ));
 
-        let (status_collector, _cancel_tx, syncs) = create_task_input();
+        let (input, status_collector, _cancel_tx, syncs) = create_task_input(spawner);
 
         let payload = SubtaskPayload {
-            input: Vec::new(),
-            spawn_name: Cow::Borrowed("test"),
+            input,
             task_id: SubtaskId {
                 stage: 0,
                 task: 0,
                 try_num: 0,
             },
             status_collector: status_collector.clone(),
-            spawner,
         };
 
         let err = run_subtask(tracing::Span::current(), syncs, payload)

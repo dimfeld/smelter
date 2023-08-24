@@ -1,9 +1,6 @@
-use std::sync::Arc;
-
-use error_stack::Report;
 use tokio::sync::oneshot;
 
-use crate::{manager::SubtaskId, spawn::TaskError};
+use crate::manager::SubtaskId;
 
 #[derive(Debug, Clone)]
 pub struct StatusUpdateSpawnedData {
@@ -19,32 +16,10 @@ pub struct StatusUpdateSuccessData {
 pub enum StatusUpdateData {
     Spawned(StatusUpdateSpawnedData),
     // Report is not clonable so just stick it on the heap.
-    Retry(Arc<Report<TaskError>>),
-    Failed(Arc<Report<TaskError>>),
+    Retry(String),
+    Failed(String),
     Cancelled,
     Success(StatusUpdateSuccessData),
-}
-
-/// This structure can be passed to [StatusCollector::add] and does some of the conversions
-/// for you, such as wrapping the Report in an Arc.
-pub enum StatusUpdateInput {
-    Spawned(StatusUpdateSpawnedData),
-    Retry(Report<TaskError>),
-    Failed(Report<TaskError>),
-    Cancelled,
-    Success(StatusUpdateSuccessData),
-}
-
-impl From<StatusUpdateInput> for StatusUpdateData {
-    fn from(value: StatusUpdateInput) -> Self {
-        match value {
-            StatusUpdateInput::Spawned(s) => StatusUpdateData::Spawned(s),
-            StatusUpdateInput::Retry(report) => StatusUpdateData::Retry(Arc::new(report)),
-            StatusUpdateInput::Failed(report) => StatusUpdateData::Failed(Arc::new(report)),
-            StatusUpdateInput::Success(s) => StatusUpdateData::Success(s),
-            StatusUpdateInput::Cancelled => StatusUpdateData::Cancelled,
-        }
-    }
 }
 
 #[derive(Debug, Clone)]
