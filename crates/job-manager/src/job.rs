@@ -7,7 +7,7 @@ use tokio::{
     sync::Semaphore,
     task::{JoinError, JoinHandle},
 };
-use tracing::{event, instrument, Level};
+use tracing::{event, instrument, Level, Span};
 
 use crate::{
     spawn::TaskError, JobManager, JobStageResultReceiver, JobStageTaskSender, SchedulerBehavior,
@@ -79,6 +79,7 @@ impl Job {
 
         let stage_task = tokio::task::spawn(crate::stage::run_tasks_stage(
             stage_index,
+            Span::current(),
             new_task_rx,
             subtask_result_tx,
             self.scheduler.clone(),

@@ -5,7 +5,7 @@ use error_stack::Report;
 use flume::{Receiver, Sender};
 use futures::{stream::FuturesUnordered, FutureExt, StreamExt, TryStreamExt};
 use tokio::sync::Semaphore;
-use tracing::{event, instrument, Level};
+use tracing::{event, instrument, Level, Span};
 
 use crate::{
     manager::SubtaskId,
@@ -106,6 +106,7 @@ fn ready_for_tail_retry(
 
 #[instrument(
     level = Level::DEBUG,
+    parent = &parent_span,
     skip(
         new_task_rx,
         subtask_result_tx,
@@ -117,6 +118,7 @@ fn ready_for_tail_retry(
 )]
 pub(crate) async fn run_tasks_stage<SUBTASK: SubTask>(
     stage_index: usize,
+    parent_span: Span,
     new_task_rx: Receiver<SUBTASK>,
     subtask_result_tx: Sender<Result<TaskDefWithOutput<SUBTASK>, Report<TaskError>>>,
     scheduler: SchedulerBehavior,
@@ -249,6 +251,7 @@ pub(crate) async fn run_tasks_stage<SUBTASK: SubTask>(
                                     if !performed_tail_retry && no_more_new_tasks
                                         && ready_for_tail_retry(&scheduler, unfinished.len(), total_num_tasks)
                                     {
+                                        event!(Level::INFO, "starting tail retry");
                                         performed_tail_retry = true;
 
                                         // Re-enqueue all unfinished tasks. Some serverless platforms
