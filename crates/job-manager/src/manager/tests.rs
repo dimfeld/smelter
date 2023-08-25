@@ -1,10 +1,9 @@
 use std::{borrow::Cow, fmt::Debug, sync::Arc, time::Duration};
 
-use error_stack::{IntoReportCompat, Report, ResultExt};
+use error_stack::{Report, ResultExt};
 use thiserror::Error;
 use tracing::{event, info, Level};
 
-use super::{Job, SubtaskId};
 use crate::{
     manager::JobManager,
     scheduler::{SchedulerBehavior, SlowTaskBehavior},
@@ -12,7 +11,7 @@ use crate::{
         fail_wrapper::FailingSpawner, inprocess::InProcessSpawner, SpawnedTask, Spawner, TaskError,
     },
     task_status::{StatusCollector, StatusUpdateData},
-    SubTask, TaskDefWithOutput,
+    SubTask, SubtaskId, TaskDefWithOutput,
 };
 
 struct TestTask<SPAWNER: Spawner> {

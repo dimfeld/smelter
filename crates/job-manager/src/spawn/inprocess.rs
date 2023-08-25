@@ -5,7 +5,7 @@ use std::{borrow::Cow, future::Future};
 
 use ahash::HashMap;
 use async_trait::async_trait;
-use error_stack::{IntoReport, Report, ResultExt};
+use error_stack::{Report, ResultExt};
 use tokio::{sync::oneshot, task::JoinHandle};
 
 use super::{SpawnedTask, Spawner, TaskError};

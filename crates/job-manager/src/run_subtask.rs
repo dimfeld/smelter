@@ -1,12 +1,12 @@
 use std::sync::Arc;
 
-use error_stack::{IntoReport, Report, ResultExt};
+use error_stack::{Report, ResultExt};
 use tokio::sync::Semaphore;
 use tracing::{instrument, Level};
 
 use super::SubtaskId;
 use crate::{
-    spawn::{SpawnedTask, Spawner, TaskError},
+    spawn::TaskError,
     task_status::{
         StatusCollector, StatusUpdateData, StatusUpdateSpawnedData, StatusUpdateSuccessData,
     },
@@ -20,13 +20,13 @@ pub struct SubtaskOutput {
     pub output: Vec<u8>,
 }
 
-pub(super) struct SubtaskPayload<SUBTASK: SubTask> {
+pub(crate) struct SubtaskPayload<SUBTASK: SubTask> {
     pub input: SUBTASK,
     pub task_id: SubtaskId,
     pub status_collector: StatusCollector,
 }
 
-pub(super) struct SubtaskSyncs {
+pub(crate) struct SubtaskSyncs {
     pub global_semaphore: Option<Arc<Semaphore>>,
     pub job_semaphore: Arc<Semaphore>,
     pub cancel: tokio::sync::watch::Receiver<()>,
@@ -113,6 +113,7 @@ mod test {
     use crate::{
         manager::tests::TestSubTaskDef,
         spawn::{fail_wrapper::FailingSpawner, inprocess::InProcessSpawner, TaskError},
+        Spawner,
     };
 
     fn create_task_input<SPAWNER: Spawner>(

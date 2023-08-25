@@ -10,12 +10,22 @@ use manager::SubtaskId;
 use serde::de::DeserializeOwned;
 use spawn::{SpawnedTask, TaskError};
 
-pub mod manager;
-pub mod scheduler;
-pub mod spawn;
-pub mod task_status;
+mod job;
+mod manager;
+mod run_subtask;
+mod scheduler;
+mod spawn;
+mod stage;
+mod task_status;
 #[cfg(test)]
 mod test_util;
+
+pub use job::*;
+pub use manager::*;
+pub use scheduler::*;
+pub use spawn::*;
+pub use stage::*;
+pub use task_status::*;
 
 /// A task definition, along with the output that resulted from running it.
 #[derive(Debug)]
