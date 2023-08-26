@@ -793,28 +793,6 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "af150ab688ff2122fcef229be89cb50dd66af9e01a4ff320cc137eecc9bacc38"
 
 [[package]]
-name = "job-manager"
-version = "0.1.0"
-dependencies = [
- "ahash",
- "async-trait",
- "aws-sdk-lambda",
- "error-stack",
- "eyre",
- "flume",
- "futures",
- "once_cell",
- "serde",
- "tempfile",
- "thiserror",
- "time",
- "tokio",
- "tracing",
- "tracing-subscriber",
- "tracing-tree",
-]
-
-[[package]]
 name = "js-sys"
 version = "0.3.64"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -1304,6 +1282,34 @@ name = "smallvec"
 version = "1.11.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "62bb4feee49fdd9f707ef802e22365a35de4b7b299de4763d44bfea899442ff9"
+
+[[package]]
+name = "smelter-aws-lambda"
+version = "0.1.0"
+dependencies = [
+ "aws-sdk-lambda",
+]
+
+[[package]]
+name = "smelter-job-manager"
+version = "0.1.0"
+dependencies = [
+ "ahash",
+ "async-trait",
+ "error-stack",
+ "eyre",
+ "flume",
+ "futures",
+ "once_cell",
+ "serde",
+ "tempfile",
+ "thiserror",
+ "time",
+ "tokio",
+ "tracing",
+ "tracing-subscriber",
+ "tracing-tree",
+]
 
 [[package]]
 name = "socket2"
@@ -1815,14 +1821,6 @@ name = "windows_x86_64_msvc"
 version = "0.48.5"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "ed94fce61571a4006852b7389a063ab983c02eb1bb37b47f8272ce92d06d9538"
-
-[[package]]
-name = "worker"
-version = "0.1.0"
-
-[[package]]
-name = "worker-lambda"
-version = "0.1.0"
 
 [[package]]
 name = "zeroize"

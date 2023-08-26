@@ -1,5 +1,3 @@
-// #[cfg(feature = "aws_lambda")]
-pub mod aws_lambda;
 pub mod fail_wrapper;
 #[cfg(feature = "inprocess")]
 pub mod inprocess;
