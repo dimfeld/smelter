@@ -221,16 +221,6 @@ pub(crate) async fn run_tasks_stage<SUBTASK: SubTask>(
             }
 
             Some((task_index, result)) = running_tasks.next(), if !running_tasks.is_empty() => {
-                // let result = match result {
-                //     Ok(Some(Ok(output))) => {
-                //         let output = TASKTYPE::read_task_response(&output.output)
-                //             .into_report()
-                //             .change_context(TaskError::Failed(true));
-                //         Ok(Some(output))
-                //     }
-                //     _ => result,
-                // };
-
                 match result {
                     Ok(None) => {
                         // The semaphore closed so the task did not run. This means that the whole
