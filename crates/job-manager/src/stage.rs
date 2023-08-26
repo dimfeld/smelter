@@ -104,28 +104,39 @@ fn ready_for_tail_retry(
     }
 }
 
+pub(crate) struct StageArgs<SUBTASK: SubTask> {
+    pub stage_index: usize,
+    pub parent_span: Span,
+    pub new_task_rx: Receiver<SUBTASK>,
+    pub subtask_result_tx: Sender<Result<TaskDefWithOutput<SUBTASK>, Report<TaskError>>>,
+    pub scheduler: SchedulerBehavior,
+    pub status_collector: StatusCollector,
+    pub job_semaphore: Arc<Semaphore>,
+    pub global_semaphore: Option<Arc<Semaphore>>,
+}
+
 #[instrument(
     level = Level::DEBUG,
-    parent = &parent_span,
-    skip(
+    parent = &args.parent_span,
+    fields(
+        stage_index = %args.stage_index
+    ),
+    skip(args)
+)]
+pub(crate) async fn run_tasks_stage<SUBTASK: SubTask>(
+    args: StageArgs<SUBTASK>,
+) -> Result<(), Report<TaskError>> {
+    let StageArgs {
+        stage_index,
         new_task_rx,
         subtask_result_tx,
         scheduler,
         status_collector,
         job_semaphore,
-        global_semaphore
-    )
-)]
-pub(crate) async fn run_tasks_stage<SUBTASK: SubTask>(
-    stage_index: usize,
-    parent_span: Span,
-    new_task_rx: Receiver<SUBTASK>,
-    subtask_result_tx: Sender<Result<TaskDefWithOutput<SUBTASK>, Report<TaskError>>>,
-    scheduler: SchedulerBehavior,
-    status_collector: StatusCollector,
-    job_semaphore: Arc<Semaphore>,
-    global_semaphore: Option<Arc<Semaphore>>,
-) -> Result<(), Report<TaskError>> {
+        global_semaphore,
+        ..
+    } = args;
+
     event!(Level::DEBUG, "Adding stage {}", stage_index);
     let mut total_num_tasks = 0;
     let mut unfinished = HashMap::default();

@@ -11,8 +11,10 @@ use tracing::{event, instrument, Level, Span};
 
 use crate::{
     spawn::TaskError, JobManager, JobStageResultReceiver, JobStageTaskSender, SchedulerBehavior,
-    StageError, StatusCollector, SubTask,
+    StageArgs, StageError, StatusCollector, SubTask,
 };
+
+type StageTaskHandle = JoinHandle<Result<(), Report<TaskError>>>;
 
 /// A job in the system.
 pub struct Job {
@@ -20,7 +22,7 @@ pub struct Job {
     job_semaphore: Arc<Semaphore>,
     global_semaphore: Option<Arc<Semaphore>>,
     status_collector: StatusCollector,
-    stage_task_tx: Sender<(usize, JoinHandle<Result<(), Report<TaskError>>>)>,
+    stage_task_tx: Sender<(usize, StageTaskHandle)>,
     done: tokio::sync::watch::Sender<()>,
     num_stages: usize,
     stage_monitor_task: Option<JoinHandle<Result<(), Report<StageError>>>>,
@@ -63,7 +65,7 @@ impl Job {
 
         match stage_monitor_task.await {
             Ok(e) => e,
-            Err(e) => todo!("handle panic"),
+            Err(e) => Err(e).change_context(StageError(0)),
         }
     }
 
@@ -77,16 +79,18 @@ impl Job {
         let (subtask_result_tx, subtask_result_rx) = flume::unbounded();
         let (new_task_tx, new_task_rx) = flume::bounded(10);
 
-        let stage_task = tokio::task::spawn(crate::stage::run_tasks_stage(
+        let args = StageArgs {
             stage_index,
-            Span::current(),
+            parent_span: Span::current(),
             new_task_rx,
             subtask_result_tx,
-            self.scheduler.clone(),
-            self.status_collector.clone(),
-            self.job_semaphore.clone(),
-            self.global_semaphore.clone(),
-        ));
+            scheduler: self.scheduler.clone(),
+            status_collector: self.status_collector.clone(),
+            job_semaphore: self.job_semaphore.clone(),
+            global_semaphore: self.global_semaphore.clone(),
+        };
+
+        let stage_task = tokio::task::spawn(crate::stage::run_tasks_stage(args));
         event!(Level::DEBUG, %stage_index, "Started stage");
 
         let tx = JobStageTaskSender {
@@ -120,7 +124,7 @@ impl Job {
 
     #[instrument(level = "debug")]
     async fn monitor_job_stages(
-        stage_task_rx: Receiver<(usize, JoinHandle<Result<(), Report<TaskError>>>)>,
+        stage_task_rx: Receiver<(usize, StageTaskHandle)>,
         mut close: tokio::sync::watch::Receiver<()>,
         job_semaphore: Arc<Semaphore>,
     ) -> Result<(), Report<StageError>> {
@@ -143,8 +147,8 @@ impl Job {
                         }
                         Err(e) => {
                             // Task panicked
-                            event!(Level::ERROR, ?e, "Task panicked");
-                            todo!()
+                            job_semaphore.close();
+                            return Err(e).change_context(StageError(index));
                         }
 
                     }
