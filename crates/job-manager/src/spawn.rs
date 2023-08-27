@@ -1,11 +1,10 @@
 pub mod fail_wrapper;
 #[cfg(feature = "inprocess")]
 pub mod inprocess;
-pub mod local;
 
 use std::borrow::Cow;
 
-use error_stack::Report;
+use error_stack::{Report, ResultExt};
 use thiserror::Error;
 
 use crate::manager::SubtaskId;
@@ -24,6 +23,17 @@ pub trait Spawner: Send + Sync + 'static {
         task_name: Cow<'static, str>,
         input: Vec<u8>,
     ) -> Result<Self::SpawnedTask, Report<TaskError>>;
+
+    /// Spawn a task, and convert the task payload to JSON.
+    async fn spawn_with_json(
+        &self,
+        task_id: SubtaskId,
+        task_name: Cow<'static, str>,
+        data: impl serde::Serialize + Send,
+    ) -> Result<Self::SpawnedTask, Report<TaskError>> {
+        let data = serde_json::to_vec(&data).change_context(TaskError::TaskGenerationFailed)?;
+        self.spawn(task_id, task_name, data).await
+    }
 }
 
 #[derive(Debug, Error)]

@@ -6,9 +6,9 @@
 use std::{borrow::Cow, fmt::Debug};
 
 use error_stack::Report;
-use manager::SubtaskId;
+pub use manager::SubtaskId;
 use serde::de::DeserializeOwned;
-use spawn::{SpawnedTask, TaskError};
+pub use spawn::{SpawnedTask, TaskError};
 
 mod job;
 mod manager;

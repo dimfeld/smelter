@@ -1379,6 +1379,7 @@ dependencies = [
  "futures",
  "once_cell",
  "serde",
+ "serde_json",
  "tempfile",
  "thiserror",
  "time",
@@ -1386,6 +1387,20 @@ dependencies = [
  "tracing",
  "tracing-subscriber",
  "tracing-tree",
+]
+
+[[package]]
+name = "smelter-local-jobs"
+version = "0.1.0"
+dependencies = [
+ "async-trait",
+ "error-stack",
+ "serde",
+ "serde_json",
+ "smelter-job-manager",
+ "tempfile",
+ "tokio",
+ "tracing",
 ]
 
 [[package]]

@@ -1,0 +1,17 @@
+[package]
+name = "smelter-local-jobs"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+async-trait = "0.1.73"
+error-stack = { version = "0.4.0", features = ["serde", "eyre"] }
+smelter-job-manager = { path = "../job-manager" }
+serde = { version = "1.0.186", features = ["derive"] }
+tokio = { version = "1.32.0", features = ["full"] }
+tracing = "0.1.37"
+serde_json = "1.0.105"
+
+[dev-dependencies]
+tempfile = "3.8.0"
+

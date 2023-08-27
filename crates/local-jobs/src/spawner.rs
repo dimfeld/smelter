@@ -4,10 +4,8 @@
 use std::{borrow::Cow, path::PathBuf, process::ExitStatus};
 
 use error_stack::{Report, ResultExt};
+use smelter_job_manager::{SpawnedTask, Spawner, SubtaskId, TaskError};
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
-
-use super::{SpawnedTask, Spawner, TaskError};
-use crate::manager::SubtaskId;
 
 #[derive(Default)]
 pub struct LocalSpawner {
