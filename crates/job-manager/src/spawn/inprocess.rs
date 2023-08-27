@@ -6,6 +6,7 @@ use std::{borrow::Cow, future::Future};
 use ahash::HashMap;
 use async_trait::async_trait;
 use error_stack::{Report, ResultExt};
+use smelter_worker::{WorkerError, WorkerResult};
 use tokio::{sync::oneshot, task::JoinHandle};
 
 use super::{SpawnedTask, Spawner, TaskError};
@@ -66,7 +67,7 @@ where
                 })
                 .await?;
 
-                Ok::<Vec<u8>, TaskError>(result.into())
+                Ok::<String, TaskError>(result)
             })),
         };
 
@@ -76,7 +77,7 @@ where
 
 pub struct InProcessSpawnedTask {
     task_id: SubtaskId,
-    task: Option<JoinHandle<Result<Vec<u8>, TaskError>>>,
+    task: Option<JoinHandle<Result<String, TaskError>>>,
 }
 
 #[async_trait]
@@ -99,15 +100,15 @@ impl SpawnedTask for InProcessSpawnedTask {
         };
 
         let result = task.await;
-        let retryable = match &result {
-            Ok(Ok(_)) => false,
-            Ok(Err(e)) => e.retryable(),
-            Err(_) => false,
+        let result = match &result {
+            Ok(Ok(r)) => WorkerResult::Ok(r),
+            Ok(Err(e)) => WorkerResult::Err(WorkerError::from_error(e.retryable(), e)),
+            Err(e) => WorkerResult::Err(WorkerError::from_error(false, e)),
         };
 
-        result
-            .change_context(TaskError::Failed(retryable))?
-            .map_err(Report::from)
+        let result = serde_json::to_vec(&result).change_context(TaskError::Failed(true))?;
+
+        Ok(result)
     }
 }
 
@@ -225,8 +226,17 @@ mod test {
         }
 
         println!("output: {:?}", outputs);
-        assert_eq!(outputs.get("000-00001-00"), Some(&"result 1".to_string()));
-        assert_eq!(outputs.get("000-00002-00"), Some(&"result 2".to_string()));
-        assert_eq!(outputs.get("000-00003-00"), Some(&"result 3".to_string()));
+        assert_eq!(
+            outputs.get("000-00001-00"),
+            Some(&r##"{"type":"ok","data":"result 1"}"##.to_string())
+        );
+        assert_eq!(
+            outputs.get("000-00002-00"),
+            Some(&r##"{"type":"ok","data":"result 2"}"##.to_string())
+        );
+        assert_eq!(
+            outputs.get("000-00003-00"),
+            Some(&r##"{"type":"ok","data":"result 3"}"##.to_string())
+        );
     }
 }

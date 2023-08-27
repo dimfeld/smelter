@@ -75,10 +75,6 @@ impl<SPAWNER: Spawner> SubTask for TestSubTaskDef<SPAWNER> {
 
         Ok(Box::new(task))
     }
-
-    fn read_task_response(data: Vec<u8>) -> Result<Self::Output, TaskError> {
-        Ok(String::from_utf8(data).unwrap_or_else(|_| String::new()))
-    }
 }
 
 impl<SPAWNER: Spawner> TestTask<SPAWNER> {

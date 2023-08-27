@@ -47,7 +47,4 @@ pub trait SubTask: Clone + Debug + Send + Sync + 'static {
 
     /// Start the task with the appropriate arguments.
     async fn spawn(&self, task_id: SubtaskId) -> Result<Box<dyn SpawnedTask>, Report<TaskError>>;
-
-    /// Deserialize the task's result.
-    fn read_task_response(data: Vec<u8>) -> Result<Self::Output, TaskError>;
 }

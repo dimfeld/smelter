@@ -4,6 +4,7 @@ use ahash::HashMap;
 use error_stack::Report;
 use flume::{Receiver, Sender};
 use futures::{stream::FuturesUnordered, FutureExt, StreamExt, TryStreamExt};
+use smelter_worker::WorkerResult;
 use tokio::sync::Semaphore;
 use tracing::{event, instrument, Level, Span};
 
@@ -11,8 +12,8 @@ use crate::{
     manager::SubtaskId,
     run_subtask::{run_subtask, SubtaskPayload, SubtaskSyncs},
     spawn::TaskError,
-    SchedulerBehavior, SlowTaskBehavior, StatusCollector, StatusUpdateData, SubTask,
-    TaskDefWithOutput,
+    SchedulerBehavior, SerializedWorkerFailure, SlowTaskBehavior, StatusCollector,
+    StatusUpdateData, SubTask, TaskDefWithOutput,
 };
 
 /// Information to run a task as well as which retry we're on.
@@ -228,10 +229,10 @@ pub(crate) async fn run_tasks_stage<SUBTASK: SubTask>(
                     }
                     Ok(Some(Ok(output))) => {
                         if let Some(mut task_info) = unfinished.remove(&task_index) {
-                            let output = SUBTASK::read_task_response(output.output);
+                            let output = WorkerResult::<SUBTASK::Output>::parse(&output.output);
                             match output {
                                 Err(e) => {
-                                    let e = Report::new(e).change_context(TaskError::Failed(true));
+                                    let e = Report::new(SerializedWorkerFailure(e.error)).change_context(TaskError::Failed(e.retryable));
                                     retry_or_fail(
                                         &mut running_tasks,
                                         e,

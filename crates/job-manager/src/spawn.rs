@@ -40,6 +40,10 @@ pub trait Spawner: Send + Sync + 'static {
 #[error("Stage {0} failed")]
 pub struct StageError(pub usize);
 
+#[derive(Debug, Error)]
+#[error("{0}")]
+pub struct SerializedWorkerFailure(pub String);
+
 #[derive(Clone, Error, Debug, PartialEq, Eq)]
 pub enum TaskError {
     #[error("Failed to start")]
@@ -80,4 +84,26 @@ pub trait SpawnedTask: Send + Sync + 'static {
     async fn wait(&mut self) -> Result<Vec<u8>, Report<TaskError>>;
     /// Attempt to kill a task before it finishes.
     async fn kill(&mut self) -> Result<(), Report<TaskError>>;
+
+    /// Convert a SpawnedTask into a boxed trait object, to return it to the job system.
+    fn into_boxed(self) -> Box<dyn SpawnedTask>
+    where
+        Self: Sized,
+    {
+        Box::new(self)
+    }
+}
+
+/// Convert a [SpawnedTask] inside a [Result] into a boxed trait object.
+trait SpawnedTaskResultExt<E> {
+    fn into_boxed(self) -> Result<Box<dyn SpawnedTask>, E>
+    where
+        Self: Sized;
+}
+
+impl<ST: SpawnedTask, E> SpawnedTaskResultExt<E> for Result<ST, E> {
+    /// Convert a [SpawnedTask] inside a [Result] into a boxed trait object.
+    fn into_boxed(self) -> Result<Box<dyn SpawnedTask>, E> {
+        self.map(|st| st.into_boxed())
+    }
 }

@@ -107,6 +107,7 @@ async fn run_subtask_internal<SUBTASK: SubTask>(
 mod test {
     use std::time::Duration;
 
+    use smelter_worker::WorkerResult;
     use tokio::time::timeout;
 
     use super::*;
@@ -164,11 +165,12 @@ mod test {
             .await
             .expect("task result should return Some")
             .expect("task result should be Ok");
-        assert_eq!(
-            String::from_utf8(result.output).expect("decoding utf8"),
-            "result 000-00000-00",
-            "output"
-        );
+        let output: Result<_, _> = serde_json::from_slice::<WorkerResult<String>>(&result.output)
+            .expect("decoding result json")
+            .into();
+        let output = output.expect("successful");
+
+        assert_eq!(output, "result 000-00000-00", "output");
     }
 
     #[tokio::test]
@@ -281,7 +283,7 @@ mod test {
             .expect("task result should be Ok");
         assert_eq!(
             String::from_utf8(result.output).expect("decoding utf8"),
-            "result 000-00000-00",
+            r##"{"type":"ok","data":"result 000-00000-00"}"##,
             "output location"
         );
     }
@@ -386,30 +388,6 @@ mod test {
             result.is_none(),
             "task should not run because job semaphore closed"
         );
-    }
-
-    #[tokio::test]
-    async fn failed_task() {
-        let spawner = Arc::new(InProcessSpawner::new(|_| async move {
-            Err::<String, _>(TaskError::Failed(false))
-        }));
-        let (input, status_collector, _cancel_tx, syncs) = create_task_input(spawner);
-
-        let payload = SubtaskPayload {
-            input,
-            task_id: SubtaskId {
-                stage: 0,
-                task: 0,
-                try_num: 0,
-            },
-            status_collector: status_collector.clone(),
-        };
-
-        let err = run_subtask(tracing::Span::current(), syncs, payload)
-            .await
-            .expect("task result should return Some")
-            .expect_err("task result should be Err");
-        assert_eq!(err.current_context(), &TaskError::Failed(false));
     }
 
     #[tokio::test]

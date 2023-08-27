@@ -1,7 +1,13 @@
+// #![warn(missing_docs)]
+// #![warn(clippy::missing_docs_in_private_items)]
+
+//! Spawn Smelter jobs as local tasks. This is mostly useful for testing and development.
+
 use std::path::PathBuf;
 
 use error_stack::{Report, ResultExt};
 use smelter_job_manager::TaskError;
+use smelter_worker::WorkerResult;
 
 pub mod spawner;
 pub mod worker;
@@ -36,15 +42,19 @@ impl LocalWorkerInfo {
         .change_context(TaskError::Failed(true))?
     }
 
-    pub async fn write_json_result(
+    pub async fn write_json_result<DATA>(
         &self,
-        data: impl serde::Serialize + Send + 'static,
-    ) -> Result<(), Report<TaskError>> {
+        result: impl Into<WorkerResult<DATA>>,
+    ) -> Result<(), Report<TaskError>>
+    where
+        DATA: serde::Serialize + Send + 'static,
+    {
+        let result = result.into();
         let output = self.output.clone();
         tokio::task::spawn_blocking(move || {
             let file = std::fs::File::create(output).change_context(TaskError::Failed(true))?;
             let mut file = std::io::BufWriter::new(file);
-            serde_json::to_writer(&mut file, &data).change_context(TaskError::Failed(true))
+            serde_json::to_writer(&mut file, &result).change_context(TaskError::Failed(true))
         })
         .await
         .change_context(TaskError::Failed(true))?
