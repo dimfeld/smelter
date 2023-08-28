@@ -1,6 +1,7 @@
 use std::sync::Arc;
 
 use error_stack::{Report, ResultExt};
+use smelter_worker::WorkerResult;
 use tokio::sync::Semaphore;
 use tracing::{instrument, Level};
 
@@ -10,14 +11,14 @@ use crate::{
     task_status::{
         StatusCollector, StatusUpdateData, StatusUpdateSpawnedData, StatusUpdateSuccessData,
     },
-    SubTask,
+    SerializedWorkerFailure, SubTask,
 };
 
-pub(super) type SubtaskResult = Result<SubtaskOutput, Report<TaskError>>;
+pub(super) type SubtaskResult<T> = Result<SubtaskOutput<T>, Report<TaskError>>;
 
 #[derive(Debug)]
-pub struct SubtaskOutput {
-    pub output: Vec<u8>,
+pub struct SubtaskOutput<T> {
+    pub output: T,
 }
 
 pub(crate) struct SubtaskPayload<SUBTASK: SubTask> {
@@ -37,7 +38,7 @@ pub(super) async fn run_subtask<SUBTASK: SubTask>(
     parent_span: tracing::Span,
     syncs: Arc<SubtaskSyncs>,
     payload: SubtaskPayload<SUBTASK>,
-) -> Option<SubtaskResult> {
+) -> Option<SubtaskResult<SUBTASK::Output>> {
     let SubtaskSyncs {
         global_semaphore,
         job_semaphore,
@@ -67,7 +68,7 @@ pub(super) async fn run_subtask<SUBTASK: SubTask>(
 async fn run_subtask_internal<SUBTASK: SubTask>(
     mut cancel: tokio::sync::watch::Receiver<()>,
     payload: SubtaskPayload<SUBTASK>,
-) -> SubtaskResult {
+) -> SubtaskResult<SUBTASK::Output> {
     let SubtaskPayload {
         input,
         task_id,
@@ -86,13 +87,18 @@ async fn run_subtask_internal<SUBTASK: SubTask>(
     tokio::select! {
         res = task.wait() => {
             let res = res.attach_printable_lazy(|| format!("Job {task_id} Runtime ID {runtime_id}"))?;
+
+            let output: SUBTASK::Output = WorkerResult::parse(&res)
+                .map_err(|e| Report::new(SerializedWorkerFailure(e.error)).change_context(TaskError::Failed(e.retryable)))
+                .attach_printable_lazy(|| format!("Job {task_id} Runtime ID {runtime_id}"))?;
+
             status_collector.add(task_id, StatusUpdateData::Success(
                     StatusUpdateSuccessData {
                         output: res.clone(),
                     }
                 ));
 
-            Ok(SubtaskOutput { output: res })
+            Ok(SubtaskOutput { output })
         }
 
         _ = cancel.changed() => {
@@ -107,7 +113,6 @@ async fn run_subtask_internal<SUBTASK: SubTask>(
 mod test {
     use std::time::Duration;
 
-    use smelter_worker::WorkerResult;
     use tokio::time::timeout;
 
     use super::*;
@@ -165,12 +170,8 @@ mod test {
             .await
             .expect("task result should return Some")
             .expect("task result should be Ok");
-        let output: Result<_, _> = serde_json::from_slice::<WorkerResult<String>>(&result.output)
-            .expect("decoding result json")
-            .into();
-        let output = output.expect("successful");
 
-        assert_eq!(output, "result 000-00000-00", "output");
+        assert_eq!(result.output, "result 000-00000-00", "output");
     }
 
     #[tokio::test]
@@ -281,11 +282,7 @@ mod test {
             .expect("task should finish")
             .expect("task result should return Some")
             .expect("task result should be Ok");
-        assert_eq!(
-            String::from_utf8(result.output).expect("decoding utf8"),
-            r##"{"type":"ok","data":"result 000-00000-00"}"##,
-            "output location"
-        );
+        assert_eq!(result.output, "result 000-00000-00", "output location");
     }
 
     #[tokio::test]

@@ -4,7 +4,6 @@ use ahash::HashMap;
 use error_stack::Report;
 use flume::{Receiver, Sender};
 use futures::{stream::FuturesUnordered, FutureExt, StreamExt, TryStreamExt};
-use smelter_worker::WorkerResult;
 use tokio::sync::Semaphore;
 use tracing::{event, instrument, Level, Span};
 
@@ -12,8 +11,8 @@ use crate::{
     manager::SubtaskId,
     run_subtask::{run_subtask, SubtaskPayload, SubtaskSyncs},
     spawn::TaskError,
-    SchedulerBehavior, SerializedWorkerFailure, SlowTaskBehavior, StatusCollector,
-    StatusUpdateData, SubTask, TaskDefWithOutput,
+    SchedulerBehavior, SlowTaskBehavior, StatusCollector, StatusUpdateData, SubTask,
+    TaskDefWithOutput,
 };
 
 /// Information to run a task as well as which retry we're on.
@@ -225,55 +224,38 @@ pub(crate) async fn run_tasks_stage<SUBTASK: SubTask>(
                 match result {
                     Ok(None) => {
                         // The semaphore closed so the task did not run. This means that the whole
-                        // system is shutting down, so don't worry about it here.
+                        // job or system is shutting down, so don't worry about it here.
                     }
                     Ok(Some(Ok(output))) => {
-                        if let Some(mut task_info) = unfinished.remove(&task_index) {
-                            let output = WorkerResult::<SUBTASK::Output>::parse(&output.output);
-                            match output {
-                                Err(e) => {
-                                    let e = Report::new(SerializedWorkerFailure(e.error)).change_context(TaskError::Failed(e.retryable));
-                                    retry_or_fail(
-                                        &mut running_tasks,
-                                        e,
-                                        task_index,
-                                        &mut task_info,
-                                    )?;
+                        if let Some(task_info) = unfinished.remove(&task_index) {
+                            let output = TaskDefWithOutput {
+                                task_def: task_info.input,
+                                output: output.output,
+                            };
+                            subtask_result_tx.send_async(Ok(output)).await.ok();
 
-                                    // Deserialization failed, so put it back.
-                                    unfinished.insert(task_index, task_info);
-                                }
-                                Ok(output) => {
-                                    let output = TaskDefWithOutput {
-                                        task_def: task_info.input,
-                                        output,
-                                    };
-                                    subtask_result_tx.send_async(Ok(output)).await.ok();
+                            if !performed_tail_retry && no_more_new_tasks
+                                && ready_for_tail_retry(&scheduler, unfinished.len(), total_num_tasks)
+                            {
+                                event!(Level::INFO, "starting tail retry");
+                                performed_tail_retry = true;
 
-                                    if !performed_tail_retry && no_more_new_tasks
-                                        && ready_for_tail_retry(&scheduler, unfinished.len(), total_num_tasks)
-                                    {
-                                        event!(Level::INFO, "starting tail retry");
-                                        performed_tail_retry = true;
+                                // Re-enqueue all unfinished tasks. Some serverless platforms
+                                // can have very high tail latency, so this gets around that issue.
+                                for (i, task) in unfinished.iter_mut() {
+                                    status_collector.add(
+                                        SubtaskId {
+                                            stage: stage_index as u16,
+                                            task: *i as u32,
+                                            try_num: task.try_num as u16,
+                                        },
+                                        StatusUpdateData::Retry(format!("{:?}", Report::new(
+                                            TaskError::TailRetry,
+                                        ))),
+                                    );
 
-                                        // Re-enqueue all unfinished tasks. Some serverless platforms
-                                        // can have very high tail latency, so this gets around that issue.
-                                        for (i, task) in unfinished.iter_mut() {
-                                            status_collector.add(
-                                                SubtaskId {
-                                                    stage: stage_index as u16,
-                                                    task: *i as u32,
-                                                    try_num: task.try_num as u16,
-                                                },
-                                                StatusUpdateData::Retry(format!("{:?}", Report::new(
-                                                    TaskError::TailRetry,
-                                                ))),
-                                            );
-
-                                            task.try_num += 1;
-                                            spawn_task(*i, task.try_num as u16, task.input.clone(), &mut running_tasks);
-                                        }
-                                    }
+                                    task.try_num += 1;
+                                    spawn_task(*i, task.try_num as u16, task.input.clone(), &mut running_tasks);
                                 }
                             }
                         }
