@@ -4,10 +4,10 @@ pub mod inprocess;
 
 use std::borrow::Cow;
 
-use error_stack::{Report, ResultExt};
+use error_stack::Report;
 use thiserror::Error;
 
-use crate::manager::SubtaskId;
+use crate::SubtaskId;
 
 #[async_trait::async_trait]
 pub trait Spawner: Send + Sync + 'static {
@@ -21,43 +21,46 @@ pub trait Spawner: Send + Sync + 'static {
         &self,
         task_id: SubtaskId,
         task_name: Cow<'static, str>,
-        input: Vec<u8>,
+        input: impl serde::Serialize + Send,
     ) -> Result<Self::SpawnedTask, Report<TaskError>>;
-
-    /// Spawn a task, and convert the task payload to JSON.
-    async fn spawn_with_json(
-        &self,
-        task_id: SubtaskId,
-        task_name: Cow<'static, str>,
-        data: impl serde::Serialize + Send,
-    ) -> Result<Self::SpawnedTask, Report<TaskError>> {
-        let data = serde_json::to_vec(&data).change_context(TaskError::TaskGenerationFailed)?;
-        self.spawn(task_id, task_name, data).await
-    }
 }
 
 #[derive(Debug, Error)]
 #[error("Stage {0} failed")]
 pub struct StageError(pub usize);
 
+/// A stringified error copied from a worker's output.
 #[derive(Debug, Error)]
 #[error("{0}")]
 pub struct SerializedWorkerFailure(pub String);
 
+/// An error indicating that a task failed in some way.
 #[derive(Clone, Error, Debug, PartialEq, Eq)]
 pub enum TaskError {
+    /// The spawner failed to start the task.
     #[error("Failed to start")]
     DidNotStart(bool),
+    /// The task exceeded its timeout.
     #[error("Task timed out")]
     TimedOut,
+    /// The task disappeared in such a way that the job manager could not figure out what happened
+    /// to it. This might happen, for example, if a serverless job is started but at some point
+    /// requests for its status return a "not found" error.
     #[error("Task was lost by runtime")]
     Lost,
+    /// The task was cancelled because the job is finishing early. This usually means that some
+    /// other task in the job failed.
     #[error("Task was cancelled")]
     Cancelled,
+    /// The task failed.
     #[error("Task encountered an error")]
     Failed(bool),
-    #[error("Failed to generate tasks from query")]
+    /// The setup for the task failed.
+    #[error("Failed to generate a subtask")]
     TaskGenerationFailed,
+    /// This error indicates that the job is coming near an end, and another copy of this task was
+    /// opportunistically spawned, since this one had not finished yet and the [SlowTaskBehavior] condition
+    /// was reached.
     #[error("Retrying per tail task policy")]
     TailRetry,
 }

@@ -7,10 +7,9 @@ use std::path::PathBuf;
 
 use error_stack::{Report, ResultExt};
 use smelter_job_manager::TaskError;
-use smelter_worker::WorkerResult;
+use smelter_worker::{WorkerInput, WorkerResult};
 
 pub mod spawner;
-pub mod worker;
 
 pub struct LocalWorkerInfo {
     pub input: PathBuf,
@@ -28,21 +27,25 @@ impl LocalWorkerInfo {
         })
     }
 
-    pub async fn read_json_payload<PAYLOAD: serde::de::DeserializeOwned + Send + 'static>(
+    pub async fn read_input<PAYLOAD: serde::de::DeserializeOwned + Send + 'static>(
         &self,
-    ) -> Result<PAYLOAD, Report<TaskError>> {
+    ) -> Result<WorkerInput<PAYLOAD>, Report<TaskError>> {
         let input = self.input.clone();
-        tokio::task::spawn_blocking(move || {
+        let worker_input = tokio::task::spawn_blocking(move || {
             let file = std::fs::File::open(input).change_context(TaskError::Failed(true))?;
             let file = std::io::BufReader::new(file);
 
-            serde_json::from_reader::<_, PAYLOAD>(file).change_context(TaskError::Failed(true))
+            serde_json::from_reader::<_, WorkerInput<PAYLOAD>>(file)
+                .change_context(TaskError::Failed(true))
         })
         .await
-        .change_context(TaskError::Failed(true))?
+        .change_context(TaskError::Failed(true))??;
+
+        worker_input.propagate_tracing_context();
+        Ok(worker_input)
     }
 
-    pub async fn write_json_result<DATA>(
+    pub async fn write_output<DATA>(
         &self,
         result: impl Into<WorkerResult<DATA>>,
     ) -> Result<(), Report<TaskError>>

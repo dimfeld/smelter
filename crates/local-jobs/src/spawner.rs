@@ -4,25 +4,24 @@
 use std::{borrow::Cow, path::PathBuf, process::ExitStatus};
 
 use error_stack::{Report, ResultExt};
-use smelter_job_manager::{SpawnedTask, Spawner, SubtaskId, TaskError};
+use serde::Serialize;
+use smelter_job_manager::{SpawnedTask, Spawner, TaskError};
+use smelter_worker::{SubtaskId, WorkerInput};
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 
 #[derive(Default)]
 pub struct LocalSpawner {
-    shell: bool,
-    tmpdir: Option<PathBuf>,
+    pub shell: bool,
+    pub tmpdir: Option<PathBuf>,
 }
 
-#[async_trait::async_trait]
-impl Spawner for LocalSpawner {
-    type SpawnedTask = LocalSpawnedTask;
-
-    async fn spawn(
+impl LocalSpawner {
+    pub async fn spawn_command(
         &self,
         task_id: SubtaskId,
-        task_name: Cow<'static, str>,
-        input: Vec<u8>,
-    ) -> Result<Self::SpawnedTask, Report<TaskError>> {
+        mut command: tokio::process::Command,
+        input: impl Serialize + Send,
+    ) -> Result<LocalSpawnedTask, Report<TaskError>> {
         let dir = self
             .tmpdir
             .as_deref()
@@ -30,12 +29,15 @@ impl Spawner for LocalSpawner {
             .unwrap_or_else(|| Cow::from(std::env::temp_dir()));
 
         let input_path = dir.join(format!("{task_id}-input.json"));
-        let output_path = dir.join(format!("{task_id}-output"));
+        let output_path = dir.join(format!("{task_id}-output.json"));
 
         let mut input_file = tokio::fs::File::create(&input_path)
             .await
             .change_context(TaskError::DidNotStart(false))
             .attach_printable("Failed to create temporary directory for input")?;
+
+        let input = serde_json::to_vec(&WorkerInput::new(task_id, input))
+            .change_context(TaskError::TaskGenerationFailed)?;
 
         input_file
             .write_all(&input)
@@ -49,25 +51,41 @@ impl Spawner for LocalSpawner {
             .change_context(TaskError::DidNotStart(false))
             .attach_printable("Failed to write input definition")?;
 
+        let child_process = command
+            .env("INPUT_FILE", &input_path)
+            .env("OUTPUT_FILE", &output_path)
+            .spawn()
+            .change_context(TaskError::DidNotStart(false))?;
+
+        Ok(LocalSpawnedTask {
+            input_path,
+            output_path,
+            child_process,
+            persist: false,
+        })
+    }
+}
+
+#[async_trait::async_trait]
+impl Spawner for LocalSpawner {
+    type SpawnedTask = LocalSpawnedTask;
+
+    async fn spawn(
+        &self,
+        task_id: SubtaskId,
+        task_name: Cow<'static, str>,
+        input: impl Serialize + Send,
+    ) -> Result<Self::SpawnedTask, Report<TaskError>> {
         let (exec_name, args) = if self.shell {
             ("sh", vec!["-c", task_name.as_ref()])
         } else {
             (task_name.as_ref(), vec![])
         };
 
-        let child_process = tokio::process::Command::new(exec_name)
-            .args(args)
-            .env("INPUT_FILE", &input_path)
-            .env("OUTPUT_FILE", &output_path)
-            .spawn()
-            .change_context(TaskError::DidNotStart(false))
-            .attach_printable_lazy(|| format!("Failed to start worker process {task_name}"))?;
+        let mut command = tokio::process::Command::new(exec_name);
+        command.args(args);
 
-        Ok(LocalSpawnedTask {
-            input_path,
-            output_path,
-            child_process,
-        })
+        self.spawn_command(task_id, command, input).await
     }
 }
 
@@ -75,9 +93,16 @@ pub struct LocalSpawnedTask {
     input_path: PathBuf,
     output_path: PathBuf,
     child_process: tokio::process::Child,
+    persist: bool,
 }
 
 impl LocalSpawnedTask {
+    /// If called, the input and output files for the task will not be deleted when the task is
+    /// done.
+    pub fn persist(&mut self) {
+        self.persist = true;
+    }
+
     fn handle_exit_status(status: ExitStatus) -> Result<(), Report<TaskError>> {
         if status.success() {
             Ok(())
@@ -132,7 +157,12 @@ impl SpawnedTask for LocalSpawnedTask {
 
 impl Drop for LocalSpawnedTask {
     fn drop(&mut self) {
-        tokio::spawn(tokio::fs::remove_file(self.input_path.clone()));
+        let input_path = self.input_path.clone();
+        let output_path = self.output_path.clone();
+        tokio::spawn(async move {
+            tokio::fs::remove_file(input_path).await.ok();
+            tokio::fs::remove_file(output_path).await.ok();
+        });
     }
 }
 
@@ -155,16 +185,14 @@ mod tests {
                     try_num: 0,
                 },
                 Cow::from("cat $INPUT_FILE > $OUTPUT_FILE"),
-                "test-output".as_bytes().to_vec(),
+                "test-output",
             )
             .await
             .expect("Spawning task");
 
         let output = task.wait().await.expect("Waiting for task");
+        let output: WorkerInput<String> = serde_json::from_slice(&output).expect("Reading output");
 
-        assert_eq!(
-            String::from_utf8(output).expect("reading output to string"),
-            "test-output"
-        );
+        assert_eq!(output.input, "test-output");
     }
 }

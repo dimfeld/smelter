@@ -6,8 +6,8 @@
 use std::{borrow::Cow, fmt::Debug};
 
 use error_stack::Report;
-pub use manager::SubtaskId;
 use serde::de::DeserializeOwned;
+pub use smelter_worker::SubtaskId;
 pub use spawn::{SpawnedTask, TaskError};
 
 mod job;

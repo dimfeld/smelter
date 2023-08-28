@@ -70,7 +70,11 @@ impl<SPAWNER: Spawner> SubTask for TestSubTaskDef<SPAWNER> {
 
         let task = self
             .spawner
-            .spawn(task_id, Cow::from(self.spawn_name.clone()), Vec::new())
+            .spawn(
+                task_id,
+                Cow::from(self.spawn_name.clone()),
+                serde_json::json!({}),
+            )
             .await?;
 
         Ok(Box::new(task))

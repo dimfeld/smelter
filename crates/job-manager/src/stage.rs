@@ -8,10 +8,9 @@ use tokio::sync::Semaphore;
 use tracing::{event, instrument, Level, Span};
 
 use crate::{
-    manager::SubtaskId,
     run_subtask::{run_subtask, SubtaskPayload, SubtaskSyncs},
     spawn::TaskError,
-    SchedulerBehavior, SlowTaskBehavior, StatusCollector, StatusUpdateData, SubTask,
+    SchedulerBehavior, SlowTaskBehavior, StatusCollector, StatusUpdateData, SubTask, SubtaskId,
     TaskDefWithOutput,
 };
 

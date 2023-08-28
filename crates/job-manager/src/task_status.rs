@@ -1,6 +1,6 @@
 use tokio::sync::oneshot;
 
-use crate::manager::SubtaskId;
+use crate::SubtaskId;
 
 #[derive(Debug, Clone)]
 pub struct StatusUpdateSpawnedData {

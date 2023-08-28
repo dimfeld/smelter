@@ -6,13 +6,14 @@ use std::{borrow::Cow, future::Future};
 use ahash::HashMap;
 use async_trait::async_trait;
 use error_stack::{Report, ResultExt};
+use serde::Serialize;
 use smelter_worker::{WorkerError, WorkerResult};
 use tokio::{sync::oneshot, task::JoinHandle};
 
 use super::{SpawnedTask, Spawner, TaskError};
-use crate::manager::SubtaskId;
 #[cfg(test)]
 use crate::test_util::setup_test_tracing;
+use crate::SubtaskId;
 
 pub struct InProcessTaskInfo<'a> {
     pub task_name: String,
@@ -53,10 +54,10 @@ where
         &self,
         task_id: SubtaskId,
         task_name: Cow<'static, str>,
-        input: Vec<u8>,
+        input: impl Serialize + Send,
     ) -> Result<Self::SpawnedTask, Report<TaskError>> {
         let task_fn = self.task_fn.clone();
-        let input = input.to_vec();
+        let input = serde_json::to_vec(&input).change_context(TaskError::TaskGenerationFailed)?;
         let task = InProcessSpawnedTask {
             task_id,
             task: Some(tokio::task::spawn(async move {
@@ -211,7 +212,7 @@ mod test {
                         try_num: 0,
                     },
                     "map".into(),
-                    vec![],
+                    serde_json::json!({}),
                 )
             })
             .try_collect::<Vec<_>>()

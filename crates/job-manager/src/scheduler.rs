@@ -5,6 +5,7 @@ pub struct SchedulerBehavior {
     pub max_concurrent_tasks: Option<usize>,
     /// The maximum number of time to retry a task.
     pub max_retries: usize,
+    /// When to retry the remaining tasks in a job stage.
     pub slow_task_behavior: SlowTaskBehavior,
 }
 

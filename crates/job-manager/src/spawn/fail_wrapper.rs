@@ -1,10 +1,11 @@
 use std::borrow::Cow;
 
 use async_trait::async_trait;
-use error_stack::Report;
+use error_stack::{Report, ResultExt};
+use serde::Serialize;
 
 use super::{inprocess::InProcessTaskInfo, Spawner, TaskError};
-use crate::manager::SubtaskId;
+use crate::SubtaskId;
 
 pub struct FailingSpawner<
     SPAWNER: Spawner,
@@ -36,12 +37,14 @@ impl<
         &self,
         task_id: SubtaskId,
         task_name: Cow<'static, str>,
-        input: Vec<u8>,
+        input: impl Serialize + Send,
     ) -> Result<Self::SpawnedTask, Report<TaskError>> {
+        let input_value =
+            serde_json::to_vec(&input).change_context(TaskError::TaskGenerationFailed)?;
         let info = InProcessTaskInfo {
             task_name: task_name.to_string(),
             task_id,
-            input_value: &input,
+            input_value: &input_value,
         };
 
         (self.fail_func)(info)?;

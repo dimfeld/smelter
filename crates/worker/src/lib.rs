@@ -1,4 +1,91 @@
+use std::{collections::HashMap, io::Read};
+
+use opentelemetry::sdk::propagation::TraceContextPropagator;
 use serde::{de::DeserializeOwned, Deserialize, Serialize};
+
+/// The ID for a subtask, which uniquely identifies it within a [Job].
+#[derive(Debug, Copy, Clone)]
+#[cfg_attr(feature = "worker-side", derive(Serialize))]
+#[cfg_attr(feature = "spawner-side", derive(Deserialize))]
+pub struct SubtaskId {
+    /// Which stage the subtask is running on.
+    pub stage: u16,
+    /// The index of the task within that stage.
+    pub task: u32,
+    /// Which retry of this task is being executed.
+    pub try_num: u16,
+}
+
+impl std::fmt::Display for SubtaskId {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "{:03}-{:05}-{:02}", self.stage, self.task, self.try_num)
+    }
+}
+
+#[derive(Debug)]
+#[cfg_attr(feature = "worker-side", derive(Serialize))]
+#[cfg_attr(feature = "spawner-side", derive(Deserialize))]
+pub struct WorkerInput<T> {
+    pub task_id: SubtaskId,
+    #[cfg(feature = "opentelemetry")]
+    #[serde(default)]
+    pub trace_context: std::collections::HashMap<String, String>,
+    pub input: T,
+}
+
+#[cfg(feature = "spawner-side")]
+impl<T> WorkerInput<T> {
+    #[cfg(feature = "opentelemetry")]
+    /// Encode the current trace context so that it can be passed across process lines.
+    fn get_trace_context() -> HashMap<String, String> {
+        use opentelemetry::propagation::TextMapPropagator;
+        use tracing_opentelemetry::OpenTelemetrySpanExt;
+
+        let span = tracing::Span::current();
+        let context = span.context();
+        let propagator = TraceContextPropagator::new();
+        let mut fields = HashMap::new();
+        propagator.inject_context(&context, &mut fields);
+        fields
+    }
+
+    pub fn new(task_id: SubtaskId, input: T) -> Self {
+        #[cfg(feature = "opentelemetry")]
+        let trace_context = Self::get_trace_context();
+
+        Self {
+            task_id,
+            #[cfg(feature = "opentelemetry")]
+            trace_context,
+            input,
+        }
+    }
+}
+
+#[cfg(feature = "worker-side")]
+impl<T: DeserializeOwned + 'static> WorkerInput<T> {
+    pub fn propagate_tracing_context(&self) {
+        #[cfg(feature = "opentelemetry")]
+        {
+            use opentelemetry::propagation::TextMapPropagator;
+            use tracing_opentelemetry::OpenTelemetrySpanExt;
+
+            let propagator = TraceContextPropagator::new();
+            let context = propagator.extract(&self.trace_context);
+            let span = tracing::Span::current();
+            span.set_parent(context);
+        }
+    }
+
+    /// Parse a [WorkerInput] and propagate the trace context, if present.
+    pub fn parse(input: impl Read) -> Result<Self, serde_json::Error> {
+        let input: WorkerInput<T> = serde_json::from_reader(input)?;
+
+        input.propagate_tracing_context();
+
+        Ok(input)
+    }
+}
 
 #[cfg_attr(feature = "worker-side", derive(Serialize))]
 #[cfg_attr(feature = "spawner-side", derive(Deserialize))]
