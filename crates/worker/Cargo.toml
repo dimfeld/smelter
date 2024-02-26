@@ -6,11 +6,11 @@ edition = "2021"
 # See more keys and their definitions at https://doc.rust-lang.org/cargo/reference/manifest.html
 
 [dependencies]
-error-stack = "0.4.0"
+error-stack = "0.4.1"
 opentelemetry = { version = "0.20.0", optional = true }
-serde = { version = "1.0.188", features = ["derive"] }
-serde_json = "1.0.105"
-tracing = { version = "0.1.37", optional = true }
+serde = { version = "1.0.197", features = ["derive"] }
+serde_json = "1.0.114"
+tracing = { version = "0.1.40", optional = true }
 tracing-opentelemetry = { version = "0.20.0", optional = true }
 
 [features]
