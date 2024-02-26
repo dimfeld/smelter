@@ -15,9 +15,9 @@ pub struct StatusUpdateSuccessData {
 #[derive(Debug, Clone)]
 pub enum StatusUpdateData {
     Spawned(StatusUpdateSpawnedData),
-    // Report is not clonable so just stick it on the heap.
     Retry(String),
     Failed(String),
+    Log { stdout: bool, message: String },
     Cancelled,
     Success(StatusUpdateSuccessData),
 }
@@ -35,15 +35,38 @@ pub enum StatusUpdateOp {
     Take(tokio::sync::oneshot::Sender<Vec<StatusUpdateItem>>),
 }
 
+/// A wrapper around [StatusCollector] that only sends log messages
+#[derive(Clone)]
+pub struct LogCollector {
+    task_id: SubtaskId,
+    collector: StatusCollector,
+}
+
+impl LogCollector {
+    pub fn send(&self, stdout: bool, message: String) {
+        self.collector
+            .add(self.task_id, StatusUpdateData::Log { stdout, message });
+    }
+}
+
+impl std::fmt::Debug for LogCollector {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("LogCollector")
+            .field("task_id", &self.task_id)
+            .finish()
+    }
+}
+
 #[derive(Clone)]
 pub struct StatusCollector {
     tx: flume::Sender<StatusUpdateOp>,
+    keep_logs: bool,
 }
 
 impl StatusCollector {
-    pub fn new(estimated_num_tasks: usize) -> Self {
+    pub fn new(estimated_num_tasks: usize, keep_logs: bool) -> Self {
         let (tx, rx) = flume::unbounded();
-        let collector = StatusCollector { tx };
+        let collector = StatusCollector { tx, keep_logs };
 
         tokio::task::spawn(async move {
             let mut next_vec_size = estimated_num_tasks * 3 / 2;
@@ -52,7 +75,9 @@ impl StatusCollector {
                 match op {
                     StatusUpdateOp::Item(item) => {
                         println!("item: {:?}", item);
-                        items.push(item);
+                        if keep_logs || !matches!(&item.data, StatusUpdateData::Log { .. }) {
+                            items.push(item);
+                        }
                     }
                     StatusUpdateOp::ReadFrom((tx, start)) => {
                         let start = start.min(items.len());
@@ -74,6 +99,13 @@ impl StatusCollector {
         });
 
         collector
+    }
+
+    pub fn as_log_collector(&self, task_id: SubtaskId) -> Option<LogCollector> {
+        self.keep_logs.then(|| LogCollector {
+            task_id,
+            collector: self.clone(),
+        })
     }
 
     pub fn add(&self, task_id: SubtaskId, data: impl Into<StatusUpdateData>) {

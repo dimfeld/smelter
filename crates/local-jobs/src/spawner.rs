@@ -1,13 +1,19 @@
 //! Run workers as normal processes on the local system. This is generally only useful for
 //! development and testing.
 
-use std::{borrow::Cow, path::PathBuf, process::ExitStatus};
+use std::{
+    borrow::Cow,
+    path::PathBuf,
+    process::{ExitStatus, Stdio},
+};
 
 use error_stack::{Report, ResultExt};
+use futures::stream::TryStreamExt;
 use serde::Serialize;
-use smelter_job_manager::{SpawnedTask, Spawner, TaskError};
+use smelter_job_manager::{LogCollector, SpawnedTask, Spawner, TaskError};
 use smelter_worker::{SubtaskId, WorkerInput};
-use tokio::io::{AsyncReadExt, AsyncWriteExt};
+use tokio::io::{AsyncBufReadExt, AsyncReadExt, AsyncWriteExt};
+use tokio_stream::wrappers::LinesStream;
 
 #[derive(Default)]
 pub struct LocalSpawner {
@@ -19,6 +25,7 @@ impl LocalSpawner {
     pub async fn spawn_command(
         &self,
         task_id: SubtaskId,
+        log_collector: Option<LogCollector>,
         mut command: tokio::process::Command,
         input: impl Serialize + Send,
     ) -> Result<LocalSpawnedTask, Report<TaskError>> {
@@ -51,11 +58,42 @@ impl LocalSpawner {
             .change_context(TaskError::DidNotStart(false))
             .attach_printable("Failed to write input definition")?;
 
-        let child_process = command
+        if log_collector.is_some() {
+            command.stdout(Stdio::piped()).stderr(Stdio::piped());
+        }
+
+        let mut child_process = command
             .env("INPUT_FILE", &input_path)
             .env("OUTPUT_FILE", &output_path)
             .spawn()
             .change_context(TaskError::DidNotStart(false))?;
+
+        if let Some(collector) = log_collector {
+            {
+                let stdout = child_process.stdout.take().unwrap();
+                let stdout_reader = tokio::io::BufReader::new(stdout);
+                let collector = collector.clone();
+                tokio::task::spawn(async move {
+                    let mut stdout_lines = LinesStream::new(stdout_reader.lines());
+
+                    while let Ok(Some(line)) = stdout_lines.try_next().await {
+                        collector.send(true, line);
+                    }
+                });
+            }
+
+            {
+                let stderr = child_process.stderr.take().unwrap();
+                let stderr_reader = tokio::io::BufReader::new(stderr);
+                tokio::task::spawn(async move {
+                    let mut stderr_lines = LinesStream::new(stderr_reader.lines());
+
+                    while let Ok(Some(line)) = stderr_lines.try_next().await {
+                        collector.send(false, line);
+                    }
+                });
+            }
+        }
 
         Ok(LocalSpawnedTask {
             input_path,
@@ -74,6 +112,7 @@ impl Spawner for LocalSpawner {
         &self,
         task_id: SubtaskId,
         task_name: Cow<'static, str>,
+        log_collector: Option<LogCollector>,
         input: impl Serialize + Send,
     ) -> Result<Self::SpawnedTask, Report<TaskError>> {
         let (exec_name, args) = if self.shell {
@@ -85,7 +124,8 @@ impl Spawner for LocalSpawner {
         let mut command = tokio::process::Command::new(exec_name);
         command.args(args);
 
-        self.spawn_command(task_id, command, input).await
+        self.spawn_command(task_id, log_collector, command, input)
+            .await
     }
 }
 
@@ -177,14 +217,17 @@ mod tests {
             shell: true,
             tmpdir: Some(dir.path().to_path_buf()),
         };
+        let task_id = SubtaskId {
+            stage: 0,
+            task: 0,
+            try_num: 0,
+        };
+
         let mut task = spawner
             .spawn(
-                SubtaskId {
-                    stage: 0,
-                    task: 0,
-                    try_num: 0,
-                },
+                task_id,
                 Cow::from("cat $INPUT_FILE > $OUTPUT_FILE"),
+                None,
                 "test-output",
             )
             .await

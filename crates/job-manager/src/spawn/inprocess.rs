@@ -13,7 +13,7 @@ use tokio::{sync::oneshot, task::JoinHandle};
 use super::{SpawnedTask, Spawner, TaskError};
 #[cfg(test)]
 use crate::test_util::setup_test_tracing;
-use crate::SubtaskId;
+use crate::{LogCollector, SubtaskId};
 
 pub struct InProcessTaskInfo<'a> {
     pub task_name: String,
@@ -54,6 +54,7 @@ where
         &self,
         task_id: SubtaskId,
         task_name: Cow<'static, str>,
+        _log_collector: Option<LogCollector>,
         input: impl Serialize + Send,
     ) -> Result<Self::SpawnedTask, Report<TaskError>> {
         let task_fn = self.task_fn.clone();
@@ -205,15 +206,12 @@ mod test {
         let tasks = futures::stream::iter(1..=3)
             .map(Ok)
             .and_then(|i| {
-                spawner.spawn(
-                    SubtaskId {
-                        stage: 0,
-                        task: i,
-                        try_num: 0,
-                    },
-                    "map".into(),
-                    serde_json::json!({}),
-                )
+                let task_id = SubtaskId {
+                    stage: 0,
+                    task: i,
+                    try_num: 0,
+                };
+                spawner.spawn(task_id, "map".into(), None, serde_json::json!({}))
             })
             .try_collect::<Vec<_>>()
             .await

@@ -1,5 +1,8 @@
-use std::{collections::HashMap, io::Read};
+#[cfg(feature = "opentelemetry")]
+use std::collections::HashMap;
+use std::io::Read;
 
+#[cfg(feature = "opentelemetry")]
 use opentelemetry::sdk::propagation::TraceContextPropagator;
 use serde::{de::DeserializeOwned, Deserialize, Serialize};
 

@@ -1536,12 +1536,14 @@ version = "0.1.0"
 dependencies = [
  "async-trait",
  "error-stack",
+ "futures",
  "serde",
  "serde_json",
  "smelter-job-manager",
  "smelter-worker",
  "tempfile",
  "tokio",
+ "tokio-stream",
  "tracing",
 ]
 

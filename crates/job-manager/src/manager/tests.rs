@@ -11,7 +11,7 @@ use crate::{
         fail_wrapper::FailingSpawner, inprocess::InProcessSpawner, SpawnedTask, Spawner, TaskError,
     },
     task_status::{StatusCollector, StatusUpdateData},
-    SubTask, SubtaskId, TaskDefWithOutput,
+    LogCollector, SubTask, SubtaskId, TaskDefWithOutput,
 };
 
 struct TestTask<SPAWNER: Spawner> {
@@ -63,7 +63,11 @@ impl<SPAWNER: Spawner> SubTask for TestSubTaskDef<SPAWNER> {
         Cow::from(self.spawn_name.clone())
     }
 
-    async fn spawn(&self, task_id: SubtaskId) -> Result<Box<dyn SpawnedTask>, Report<TaskError>> {
+    async fn spawn(
+        &self,
+        task_id: SubtaskId,
+        logs: Option<LogCollector>,
+    ) -> Result<Box<dyn SpawnedTask>, Report<TaskError>> {
         if self.fail_serialize {
             Err(FailedSerializeError {}).change_context(TaskError::TaskGenerationFailed)?;
         }
@@ -73,6 +77,7 @@ impl<SPAWNER: Spawner> SubTask for TestSubTaskDef<SPAWNER> {
             .spawn(
                 task_id,
                 Cow::from(self.spawn_name.clone()),
+                logs,
                 serde_json::json!({}),
             )
             .await?;
@@ -135,7 +140,7 @@ async fn normal_run() {
         expect_failure: false,
     };
 
-    let status = StatusCollector::new(10);
+    let status = StatusCollector::new(10, true);
     let manager = JobManager::new(
         SchedulerBehavior {
             max_concurrent_tasks: None,
@@ -163,7 +168,7 @@ async fn single_stage() {
         expect_failure: false,
     };
 
-    let status = StatusCollector::new(10);
+    let status = StatusCollector::new(10, true);
     let manager = JobManager::new(
         SchedulerBehavior {
             max_concurrent_tasks: None,
@@ -218,7 +223,7 @@ async fn tail_retry() {
         expect_failure: false,
     };
 
-    let status = StatusCollector::new(10);
+    let status = StatusCollector::new(10, true);
     let manager = JobManager::new(
         SchedulerBehavior {
             max_concurrent_tasks: None,
@@ -272,7 +277,7 @@ async fn retry_failures() {
         expect_failure: false,
     };
 
-    let status = StatusCollector::new(10);
+    let status = StatusCollector::new(10, true);
     let manager = JobManager::new(
         SchedulerBehavior {
             max_concurrent_tasks: None,
@@ -326,7 +331,7 @@ async fn permanent_failure_task_error() {
         expect_failure: true,
     };
 
-    let status = StatusCollector::new(10);
+    let status = StatusCollector::new(10, true);
     let manager = JobManager::new(
         SchedulerBehavior {
             max_concurrent_tasks: None,
@@ -386,7 +391,7 @@ async fn too_many_retries() {
         expect_failure: true,
     };
 
-    let status = StatusCollector::new(10);
+    let status = StatusCollector::new(10, true);
     let manager = JobManager::new(
         SchedulerBehavior {
             max_concurrent_tasks: None,
@@ -439,7 +444,7 @@ async fn task_panicked() {
         expect_failure: false,
     };
 
-    let status = StatusCollector::new(10);
+    let status = StatusCollector::new(10, true);
     let manager = JobManager::new(
         SchedulerBehavior {
             max_concurrent_tasks: None,
@@ -491,7 +496,7 @@ async fn task_payload_serialize_failure() {
         expect_failure: true,
     };
 
-    let status = StatusCollector::new(10);
+    let status = StatusCollector::new(10, true);
     let manager = JobManager::new(
         SchedulerBehavior {
             max_concurrent_tasks: None,
@@ -545,7 +550,7 @@ async fn max_concurrent_tasks() {
         expect_failure: false,
     };
 
-    let status = StatusCollector::new(10);
+    let status = StatusCollector::new(10, true);
     let manager = JobManager::new(
         SchedulerBehavior {
             max_concurrent_tasks: Some(2),
@@ -596,7 +601,7 @@ async fn wait_unordered() {
         expect_failure: false,
     };
 
-    let status = StatusCollector::new(10);
+    let status = StatusCollector::new(10, true);
     let manager = JobManager::new(
         SchedulerBehavior {
             max_concurrent_tasks: None,

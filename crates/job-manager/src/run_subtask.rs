@@ -75,7 +75,9 @@ async fn run_subtask_internal<SUBTASK: SubTask>(
         status_collector,
     } = payload;
 
-    let mut task = input.spawn(task_id).await?;
+    let log_collector = status_collector.as_log_collector(task_id);
+
+    let mut task = input.spawn(task_id, log_collector).await?;
     let runtime_id = task.runtime_id().await?;
     status_collector.add(
         task_id,
@@ -137,7 +139,7 @@ mod test {
             cancel: cancel_rx,
         });
 
-        let status_collector = StatusCollector::new(1);
+        let status_collector = StatusCollector::new(1, true);
 
         let task = TestSubTaskDef {
             spawn_name: "test".to_string(),

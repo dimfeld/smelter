@@ -46,5 +46,9 @@ pub trait SubTask: Clone + Debug + Send + Sync + 'static {
     fn description(&self) -> Cow<'static, str>;
 
     /// Start the task with the appropriate arguments.
-    async fn spawn(&self, task_id: SubtaskId) -> Result<Box<dyn SpawnedTask>, Report<TaskError>>;
+    async fn spawn(
+        &self,
+        task_id: SubtaskId,
+        logs: Option<LogCollector>,
+    ) -> Result<Box<dyn SpawnedTask>, Report<TaskError>>;
 }
