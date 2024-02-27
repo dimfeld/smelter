@@ -37,19 +37,19 @@ pub enum StatusUpdateOp {
 
 /// A wrapper around [StatusCollector] that only sends log messages
 #[derive(Clone)]
-pub struct LogCollector {
+pub struct LogSender {
     task_id: SubtaskId,
-    collector: StatusCollector,
+    sender: StatusSender,
 }
 
-impl LogCollector {
+impl LogSender {
     pub fn send(&self, stdout: bool, message: String) {
-        self.collector
+        self.sender
             .add(self.task_id, StatusUpdateData::Log { stdout, message });
     }
 }
 
-impl std::fmt::Debug for LogCollector {
+impl std::fmt::Debug for LogSender {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.debug_struct("LogCollector")
             .field("task_id", &self.task_id)
@@ -58,15 +58,53 @@ impl std::fmt::Debug for LogCollector {
 }
 
 #[derive(Clone)]
-pub struct StatusCollector {
+pub struct StatusSender {
     tx: flume::Sender<StatusUpdateOp>,
     keep_logs: bool,
 }
 
-impl StatusCollector {
-    pub fn new(estimated_num_tasks: usize, keep_logs: bool) -> Self {
+impl StatusSender {
+    /// Create a new StatusSender and return the channel that will receive messages.
+    pub fn new(keep_logs: bool) -> (StatusSender, flume::Receiver<StatusUpdateOp>) {
         let (tx, rx) = flume::unbounded();
-        let collector = StatusCollector { tx, keep_logs };
+        let sender = StatusSender { tx, keep_logs };
+        (sender, rx)
+    }
+
+    /// Send a status update.
+    pub fn add(&self, task_id: SubtaskId, data: impl Into<StatusUpdateData>) {
+        let data = data.into();
+        if !self.keep_logs && matches!(&data, StatusUpdateData::Log { .. }) {
+            return;
+        }
+
+        self.tx
+            .send(StatusUpdateOp::Item(StatusUpdateItem {
+                task_id,
+                timestamp: time::OffsetDateTime::now_utc(),
+                data,
+            }))
+            .ok();
+    }
+
+    /// Create a copy of this collector that only sends logs
+    pub fn as_log_sender(&self, task_id: SubtaskId) -> Option<LogSender> {
+        self.keep_logs.then(|| LogSender {
+            task_id,
+            sender: self.clone(),
+        })
+    }
+}
+
+#[derive(Clone)]
+pub struct StatusCollector {
+    pub sender: StatusSender,
+}
+
+impl StatusCollector {
+    /// Create a new StatusCollector and start a task to buffer the messages.
+    pub fn new(estimated_num_tasks: usize, keep_logs: bool) -> Self {
+        let (sender, rx) = StatusSender::new(keep_logs);
 
         tokio::task::spawn(async move {
             let mut next_vec_size = estimated_num_tasks * 3 / 2;
@@ -98,46 +136,39 @@ impl StatusCollector {
             }
         });
 
-        collector
+        StatusCollector { sender }
+    }
+
+    pub fn add(&self, task_id: SubtaskId, data: impl Into<StatusUpdateData>) {
+        self.sender.add(task_id, data);
     }
 
     /// Create a copy of this collector that only sends logs
-    pub fn as_log_collector(&self, task_id: SubtaskId) -> Option<LogCollector> {
-        self.keep_logs.then(|| LogCollector {
-            task_id,
-            collector: self.clone(),
-        })
-    }
-
-    /// Add a status update to the buffer.
-    pub fn add(&self, task_id: SubtaskId, data: impl Into<StatusUpdateData>) {
-        self.tx
-            .send(StatusUpdateOp::Item(StatusUpdateItem {
-                task_id,
-                timestamp: time::OffsetDateTime::now_utc(),
-                data: data.into(),
-            }))
-            .ok();
+    pub fn as_log_sender(&self, task_id: SubtaskId) -> Option<LogSender> {
+        self.sender.as_log_sender(task_id)
     }
 
     /// Return a copy of the status updates, starting from the beginning.
     pub async fn read(&self) -> Vec<StatusUpdateItem> {
         let (tx, rx) = oneshot::channel();
-        self.tx.send(StatusUpdateOp::ReadFrom((tx, 0))).ok();
+        self.sender.tx.send(StatusUpdateOp::ReadFrom((tx, 0))).ok();
         rx.await.unwrap_or_default()
     }
 
     /// Return a copy of the status updates, starting from the requested index.
     pub async fn read_from(&self, start: usize) -> Vec<StatusUpdateItem> {
         let (tx, rx) = oneshot::channel();
-        self.tx.send(StatusUpdateOp::ReadFrom((tx, start))).ok();
+        self.sender
+            .tx
+            .send(StatusUpdateOp::ReadFrom((tx, start)))
+            .ok();
         rx.await.unwrap_or_default()
     }
 
     /// Return the status updates and clear the current buffer.
     pub async fn take(&self) -> Vec<StatusUpdateItem> {
         let (tx, rx) = oneshot::channel();
-        self.tx.send(StatusUpdateOp::Take(tx)).ok();
+        self.sender.tx.send(StatusUpdateOp::Take(tx)).ok();
         rx.await.unwrap_or_default()
     }
 }

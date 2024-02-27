@@ -37,7 +37,7 @@ impl<
         &self,
         task_id: SubtaskId,
         task_name: Cow<'static, str>,
-        log_collector: Option<crate::LogCollector>,
+        log_collector: Option<crate::LogSender>,
         input: impl Serialize + Send,
     ) -> Result<Self::SpawnedTask, Report<TaskError>> {
         let input_value =

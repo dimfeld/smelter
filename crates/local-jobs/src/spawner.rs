@@ -9,8 +9,9 @@ use std::{
 
 use error_stack::{Report, ResultExt};
 use futures::stream::TryStreamExt;
+use rand::Rng;
 use serde::Serialize;
-use smelter_job_manager::{LogCollector, SpawnedTask, Spawner, TaskError};
+use smelter_job_manager::{LogSender, SpawnedTask, Spawner, TaskError};
 use smelter_worker::{SubtaskId, WorkerInput};
 use tokio::io::{AsyncBufReadExt, AsyncReadExt, AsyncWriteExt};
 use tokio_stream::wrappers::LinesStream;
@@ -30,7 +31,7 @@ impl LocalSpawner {
     pub async fn spawn_command(
         &self,
         task_id: SubtaskId,
-        log_collector: Option<LogCollector>,
+        log_collector: Option<LogSender>,
         mut command: tokio::process::Command,
         input: impl Serialize + Send,
     ) -> Result<LocalSpawnedTask, Report<TaskError>> {
@@ -40,8 +41,9 @@ impl LocalSpawner {
             .map(Cow::from)
             .unwrap_or_else(|| Cow::from(std::env::temp_dir()));
 
-        let input_path = dir.join(format!("{task_id}-input.json"));
-        let output_path = dir.join(format!("{task_id}-output.json"));
+        let prefix: usize = rand::thread_rng().gen();
+        let input_path = dir.join(format!("{prefix}-{task_id}-input.json"));
+        let output_path = dir.join(format!("{prefix}-{task_id}-output.json"));
 
         let mut input_file = tokio::fs::File::create(&input_path)
             .await
@@ -117,7 +119,7 @@ impl Spawner for LocalSpawner {
         &self,
         task_id: SubtaskId,
         task_name: Cow<'static, str>,
-        log_collector: Option<LogCollector>,
+        log_collector: Option<LogSender>,
         input: impl Serialize + Send,
     ) -> Result<Self::SpawnedTask, Report<TaskError>> {
         let (exec_name, args) = if self.shell {

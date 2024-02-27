@@ -13,7 +13,7 @@ use tokio::{sync::oneshot, task::JoinHandle};
 use super::{SpawnedTask, Spawner, TaskError};
 #[cfg(test)]
 use crate::test_util::setup_test_tracing;
-use crate::{LogCollector, SubtaskId};
+use crate::{LogSender, SubtaskId};
 
 pub struct InProcessTaskInfo<'a> {
     pub task_name: String,
@@ -54,7 +54,7 @@ where
         &self,
         task_id: SubtaskId,
         task_name: Cow<'static, str>,
-        _log_collector: Option<LogCollector>,
+        _log_collector: Option<LogSender>,
         input: impl Serialize + Send,
     ) -> Result<Self::SpawnedTask, Report<TaskError>> {
         let task_fn = self.task_fn.clone();

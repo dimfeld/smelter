@@ -11,7 +11,7 @@ use crate::{
     task_status::{
         StatusCollector, StatusUpdateData, StatusUpdateSpawnedData, StatusUpdateSuccessData,
     },
-    SerializedWorkerFailure, SubTask,
+    SerializedWorkerFailure, StatusSender, SubTask,
 };
 
 pub(super) type SubtaskResult<T> = Result<SubtaskOutput<T>, Report<TaskError>>;
@@ -24,7 +24,7 @@ pub struct SubtaskOutput<T> {
 pub(crate) struct SubtaskPayload<SUBTASK: SubTask> {
     pub input: SUBTASK,
     pub task_id: SubtaskId,
-    pub status_collector: StatusCollector,
+    pub status_sender: StatusSender,
 }
 
 pub(crate) struct SubtaskSyncs {
@@ -72,14 +72,14 @@ async fn run_subtask_internal<SUBTASK: SubTask>(
     let SubtaskPayload {
         input,
         task_id,
-        status_collector,
+        status_sender,
     } = payload;
 
-    let log_collector = status_collector.as_log_collector(task_id);
+    let log_sender = status_sender.as_log_sender(task_id);
 
-    let mut task = input.spawn(task_id, log_collector).await?;
+    let mut task = input.spawn(task_id, log_sender).await?;
     let runtime_id = task.runtime_id().await?;
-    status_collector.add(
+    status_sender.add(
         task_id,
         StatusUpdateData::Spawned(StatusUpdateSpawnedData {
             runtime_id: runtime_id.clone(),
@@ -90,11 +90,11 @@ async fn run_subtask_internal<SUBTASK: SubTask>(
         res = task.wait() => {
             let res = res.attach_printable_lazy(|| format!("Job {task_id} Runtime ID {runtime_id}"))?;
 
-            let output: SUBTASK::Output = WorkerResult::parse(&res)
+            let output = WorkerResult::parse(&res)
                 .map_err(|e| Report::new(SerializedWorkerFailure(e.error)).change_context(TaskError::Failed(e.retryable)))
                 .attach_printable_lazy(|| format!("Job {task_id} Runtime ID {runtime_id}"))?;
 
-            status_collector.add(task_id, StatusUpdateData::Success(
+            status_sender.add(task_id, StatusUpdateData::Success(
                     StatusUpdateSuccessData {
                         output: res.clone(),
                     }
@@ -105,7 +105,7 @@ async fn run_subtask_internal<SUBTASK: SubTask>(
 
         _ = cancel.changed() => {
             task.kill().await.ok();
-            status_collector.add(task_id, StatusUpdateData::Cancelled);
+            status_sender.add(task_id, StatusUpdateData::Cancelled);
             Err(Report::new(TaskError::Cancelled))
         }
     }
@@ -160,7 +160,7 @@ mod test {
 
         let payload = SubtaskPayload {
             input,
-            status_collector: status_collector.clone(),
+            status_sender: status_collector.sender.clone(),
             task_id: SubtaskId {
                 stage: 0,
                 task: 0,
@@ -192,7 +192,7 @@ mod test {
                 task: 0,
                 try_num: 0,
             },
-            status_collector: status_collector.clone(),
+            status_sender: status_collector.sender.clone(),
         };
 
         let task = tokio::task::spawn(run_subtask(tracing::Span::current(), syncs, payload));
@@ -249,7 +249,7 @@ mod test {
                 task: 0,
                 try_num: 0,
             },
-            status_collector: status_collector.clone(),
+            status_sender: status_collector.sender.clone(),
         };
 
         let task = tokio::task::spawn(run_subtask(
@@ -319,7 +319,7 @@ mod test {
                 task: 0,
                 try_num: 0,
             },
-            status_collector: status_collector.clone(),
+            status_sender: status_collector.sender.clone(),
         };
 
         let task = tokio::task::spawn(run_subtask(
@@ -369,7 +369,7 @@ mod test {
                 task: 0,
                 try_num: 0,
             },
-            status_collector: status_collector.clone(),
+            status_sender: status_collector.sender.clone(),
         };
 
         let task = tokio::task::spawn(run_subtask(
@@ -405,7 +405,7 @@ mod test {
                 task: 0,
                 try_num: 0,
             },
-            status_collector: status_collector.clone(),
+            status_sender: status_collector.sender.clone(),
         };
 
         let err = run_subtask(tracing::Span::current(), syncs, payload)

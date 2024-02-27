@@ -49,6 +49,6 @@ pub trait SubTask: Clone + Debug + Send + Sync + 'static {
     async fn spawn(
         &self,
         task_id: SubtaskId,
-        logs: Option<LogCollector>,
+        logs: Option<LogSender>,
     ) -> Result<Box<dyn SpawnedTask>, Report<TaskError>>;
 }

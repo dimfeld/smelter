@@ -7,7 +7,7 @@ use std::borrow::Cow;
 use error_stack::Report;
 use thiserror::Error;
 
-use crate::{LogCollector, SubtaskId};
+use crate::{LogSender, SubtaskId};
 
 #[async_trait::async_trait]
 pub trait Spawner: Send + Sync + 'static {
@@ -21,7 +21,7 @@ pub trait Spawner: Send + Sync + 'static {
         &self,
         task_id: SubtaskId,
         task_name: Cow<'static, str>,
-        log_collector: Option<LogCollector>,
+        log_collector: Option<LogSender>,
         input: impl serde::Serialize + Send,
     ) -> Result<Self::SpawnedTask, Report<TaskError>>;
 }

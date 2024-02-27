@@ -10,7 +10,7 @@ use tracing::{event, instrument, Level, Span};
 use crate::{
     run_subtask::{run_subtask, SubtaskPayload, SubtaskSyncs},
     spawn::TaskError,
-    SchedulerBehavior, SlowTaskBehavior, StatusCollector, StatusUpdateData, SubTask, SubtaskId,
+    SchedulerBehavior, SlowTaskBehavior, StatusSender, StatusUpdateData, SubTask, SubtaskId,
     TaskDefWithOutput,
 };
 
@@ -119,7 +119,7 @@ pub(crate) struct StageArgs<SUBTASK: SubTask> {
     pub new_task_rx: Receiver<SUBTASK>,
     pub subtask_result_tx: Sender<Result<TaskDefWithOutput<SUBTASK>, Report<TaskError>>>,
     pub scheduler: SchedulerBehavior,
-    pub status_collector: StatusCollector,
+    pub status_sender: StatusSender,
     pub job_semaphore: Arc<Semaphore>,
     pub global_semaphore: Option<Arc<Semaphore>>,
 }
@@ -140,7 +140,7 @@ pub(crate) async fn run_tasks_stage<SUBTASK: SubTask>(
         new_task_rx,
         subtask_result_tx,
         scheduler,
-        status_collector,
+        status_sender,
         job_semaphore,
         global_semaphore,
         ..
@@ -171,7 +171,7 @@ pub(crate) async fn run_tasks_stage<SUBTASK: SubTask>(
         let payload = SubtaskPayload {
             input: task,
             task_id,
-            status_collector: status_collector.clone(),
+            status_sender: status_sender.clone(),
         };
 
         let current_span = tracing::Span::current();
@@ -194,7 +194,7 @@ pub(crate) async fn run_tasks_stage<SUBTASK: SubTask>(
         };
 
         if e.current_context().retryable() && task_info.try_num < scheduler.max_retries {
-            status_collector.add(task_id, StatusUpdateData::Retry(format!("{e:?}")));
+            status_sender.add(task_id, StatusUpdateData::Retry(format!("{e:?}")));
             task_info.try_num += 1;
             spawn_task(
                 task_index,
@@ -204,7 +204,7 @@ pub(crate) async fn run_tasks_stage<SUBTASK: SubTask>(
             );
             Ok(())
         } else {
-            status_collector.add(task_id, StatusUpdateData::Failed(format!("{e:?}")));
+            status_sender.add(task_id, StatusUpdateData::Failed(format!("{e:?}")));
             Err(e)
         }
     };
@@ -229,58 +229,60 @@ pub(crate) async fn run_tasks_stage<SUBTASK: SubTask>(
                 }
             }
 
-            Some((task_index, result)) = running_tasks.next(), if !running_tasks.is_empty() => {
-                match result {
-                    Ok(None) => {
-                        // The semaphore closed so the task did not run. This means that the whole
-                        // job or system is shutting down, so don't worry about it here.
-                    }
-                    Ok(Some(Ok(output))) => {
-                        if let Some(task_info) = unfinished.remove(&task_index) {
-                            let output = TaskDefWithOutput {
-                                task_def: task_info.input,
-                                output: output.output,
-                            };
-                            subtask_result_tx.send_async(Ok(output)).await.ok();
+            task = running_tasks.next(), if !running_tasks.is_empty()  => {
+                if let Some((task_index, result)) = task {
+                    match result {
+                        Ok(None) => {
+                            // The semaphore closed so the task did not run. This means that the whole
+                            // job or system is shutting down, so don't worry about it here.
+                        }
+                        Ok(Some(Ok(output))) => {
+                            if let Some(task_info) = unfinished.remove(&task_index) {
+                                let output = TaskDefWithOutput {
+                                    task_def: task_info.input,
+                                    output: output.output,
+                                };
+                                subtask_result_tx.send_async(Ok(output)).await.ok();
 
-                            if !performed_tail_retry && no_more_new_tasks
-                                && ready_for_tail_retry(&scheduler, unfinished.len(), total_num_tasks)
-                            {
-                                event!(Level::INFO, "starting tail retry");
-                                performed_tail_retry = true;
+                                if !performed_tail_retry && no_more_new_tasks
+                                    && ready_for_tail_retry(&scheduler, unfinished.len(), total_num_tasks)
+                                {
+                                    event!(Level::INFO, "starting tail retry");
+                                    performed_tail_retry = true;
 
-                                // Re-enqueue all unfinished tasks. Some serverless platforms
-                                // can have very high tail latency, so this gets around that issue.
-                                for (i, task) in unfinished.iter_mut() {
-                                    status_collector.add(
-                                        SubtaskId {
-                                            stage: stage_index as u16,
-                                            task: *i as u32,
-                                            try_num: task.try_num as u16,
-                                        },
-                                        StatusUpdateData::Retry(format!("{:?}", Report::new(
-                                            TaskError::TailRetry,
-                                        ))),
-                                    );
+                                    // Re-enqueue all unfinished tasks. Some serverless platforms
+                                    // can have very high tail latency, so this gets around that issue.
+                                    for (i, task) in unfinished.iter_mut() {
+                                        status_sender.add(
+                                            SubtaskId {
+                                                stage: stage_index as u16,
+                                                task: *i as u32,
+                                                try_num: task.try_num as u16,
+                                            },
+                                            StatusUpdateData::Retry(format!("{:?}", Report::new(
+                                                TaskError::TailRetry,
+                                            ))),
+                                        );
 
-                                    task.try_num += 1;
-                                    spawn_task(*i, task.try_num as u16, task.input.clone(), &mut running_tasks);
+                                        task.try_num += 1;
+                                        spawn_task(*i, task.try_num as u16, task.input.clone(), &mut running_tasks);
+                                    }
                                 }
                             }
                         }
-                    }
-                    // Task finished with an error.
-                    Ok(Some(Err(e))) => {
-                        if let Some(task_info) = unfinished.get_mut(&task_index) {
-                            retry_or_fail(&mut running_tasks, e, task_index, task_info)?;
+                        // Task finished with an error.
+                        Ok(Some(Err(e))) => {
+                            if let Some(task_info) = unfinished.get_mut(&task_index) {
+                                retry_or_fail(&mut running_tasks, e, task_index, task_info)?;
+                            }
                         }
-                    }
-                    // Task panicked. We can't really decipher the error so always consider it
-                    // retryable.
-                    Err(e) => {
-                        if let Some(task_info) = unfinished.get_mut(&task_index) {
-                            let e = Report::new(e).change_context(TaskError::Failed(true));
-                            retry_or_fail(&mut running_tasks, e, task_index, task_info)?;
+                        // Task panicked. We can't really decipher the error so always consider it
+                        // retryable.
+                        Err(e) => {
+                            if let Some(task_info) = unfinished.get_mut(&task_index) {
+                                let e = Report::new(e).change_context(TaskError::Failed(true));
+                                retry_or_fail(&mut running_tasks, e, task_index, task_info)?;
+                            }
                         }
                     }
                 }

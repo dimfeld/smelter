@@ -10,8 +10,8 @@ use std::{borrow::Cow, sync::Arc};
 use clap::Parser;
 use error_stack::Report;
 use smelter_job_manager::{
-    Job, JobManager, LogCollector, SchedulerBehavior, SpawnedTask, StatusCollector, SubTask,
-    SubtaskId, TaskError,
+    Job, JobManager, LogSender, SchedulerBehavior, SpawnedTask, StatusCollector, StatusSender,
+    StatusUpdateData, StatusUpdateOp, SubTask, SubtaskId, TaskError,
 };
 use smelter_local_jobs::spawner::LocalSpawner;
 use tokio::task::JoinSet;
@@ -27,6 +27,7 @@ pub struct Cli {
 
 #[tokio::main]
 async fn main() {
+    color_eyre::install().unwrap();
     let args = Cli::parse();
 
     if let Some(mode) = args.mode {
@@ -41,16 +42,16 @@ async fn main() {
 }
 
 async fn run_manager() {
-    let status_collector = StatusCollector::new(16, true);
+    let (status_sender, status_rx) = StatusSender::new(true);
     let scheduler = SchedulerBehavior {
         max_retries: 2,
         max_concurrent_tasks: Some(3),
         slow_task_behavior: smelter_job_manager::SlowTaskBehavior::Wait,
     };
 
-    let max_total_jobs = Arc::new(tokio::sync::Semaphore::new(6));
+    let max_total_jobs = Arc::new(tokio::sync::Semaphore::new(20));
 
-    let manager = JobManager::new(scheduler, status_collector, Some(max_total_jobs));
+    let manager = JobManager::new(scheduler, status_sender, Some(max_total_jobs));
 
     // Create 10 independent Jobs. A Job manages all the subtasks for a related task.
     let mut joins = JoinSet::new();
@@ -59,12 +60,40 @@ async fn run_manager() {
         joins.spawn(run_job(i, job));
     }
 
-    while let Some(task) = joins.join_next().await {
-        println!("Task done");
+    loop {
+        tokio::select! {
+            Ok(StatusUpdateOp::Item(item)) = status_rx.recv_async() => {
+                let message = match item.data {
+                    StatusUpdateData::Log { message, .. } => message,
+                    StatusUpdateData::Failed(message) => message,
+                    StatusUpdateData::Spawned(data) => format!("Spawned PID {}", data.runtime_id),
+                    StatusUpdateData::Retry(message) => message,
+                    StatusUpdateData::Cancelled => "Cancelled".to_string(),
+                    StatusUpdateData::Success(data) => {
+                        format!("Success: {}", String::from_utf8_lossy(&data.output))
+                    }
+                };
+                println!("{} {}: {}", item.timestamp, item.task_id, message);
+            }
+            join = joins.join_next() => {
+                if let Some(job) = join {
+                    match job {
+                        Ok(value) => {
+                            println!("Finished job {:?}", value);
+                        }
+                        Err(e) => {
+                            println!("Failed job {:?}", e);
+                        }
+                    }
+                } else {
+                    break;
+                }
+            }
+        }
     }
 }
 
-async fn run_job(job_index: usize, mut job: Job) {
+async fn run_job(job_index: usize, mut job: Job) -> usize {
     let (stage1_tx, stage1_rx) = job.add_stage().await;
     let (stage2_tx, stage2_rx) = job.add_stage().await;
 
@@ -85,13 +114,20 @@ async fn run_job(job_index: usize, mut job: Job) {
     let mut values = Vec::new();
     while let Some(task) = stage1_rx.recv().await {
         let result = task.unwrap();
-        values.push(result.output);
+        println!(
+            "Task {} finished with result {}",
+            result.task_def.description(),
+            result.output
+        );
+
+        let value: usize = result.output.parse().unwrap();
+        values.push(value);
 
         if values.len() < 4 {
             continue;
         }
 
-        let task_values = std::mem::replace(&mut values, Vec::new());
+        let task_values = std::mem::take(&mut values);
         stage2_tx
             .push(Task {
                 job_index,
@@ -107,7 +143,7 @@ async fn run_job(job_index: usize, mut job: Job) {
         stage2_tx
             .push(Task {
                 job_index,
-                task_index: 0,
+                task_index: stage2_index,
                 mode: "add-values",
                 input: values,
             })
@@ -116,7 +152,22 @@ async fn run_job(job_index: usize, mut job: Job) {
 
     stage2_tx.finish();
 
-    let results = stage2_rx.collect().await;
+    while let Some(task) = stage2_rx.recv().await {
+        match task {
+            Ok(task) => {
+                println!(
+                    "Task {} finished with result {}",
+                    task.task_def.description(),
+                    task.output
+                );
+            }
+            Err(e) => {
+                println!("Job {} failed with error {}", job_index, e);
+            }
+        }
+    }
+
+    job_index
 }
 
 #[derive(Debug, Clone)]
@@ -129,7 +180,7 @@ struct Task {
 
 #[async_trait::async_trait]
 impl SubTask for Task {
-    type Output = usize;
+    type Output = String;
 
     fn description(&self) -> Cow<'static, str> {
         format!("{}:{}:{}", self.job_index, self.mode, self.task_index).into()
@@ -138,7 +189,7 @@ impl SubTask for Task {
     async fn spawn(
         &self,
         task_id: SubtaskId,
-        logs: Option<LogCollector>,
+        logs: Option<LogSender>,
     ) -> Result<Box<dyn SpawnedTask>, Report<TaskError>> {
         let target = std::env::args().nth(0).unwrap();
         let mut command = tokio::process::Command::new(target);

@@ -5,13 +5,13 @@ use std::sync::Arc;
 
 use tokio::sync::Semaphore;
 
-use crate::{scheduler::SchedulerBehavior, task_status::StatusCollector, Job};
+use crate::{scheduler::SchedulerBehavior, Job, StatusSender};
 
 /// The [JobManager] holds state and behavior that is shared between multiple jobs.
 pub struct JobManager {
     pub(crate) scheduler: SchedulerBehavior,
     pub(crate) global_semaphore: Option<Arc<Semaphore>>,
-    pub(crate) status_collector: StatusCollector,
+    pub(crate) status_sender: StatusSender,
 }
 
 impl JobManager {
@@ -22,12 +22,12 @@ impl JobManager {
     ///   concurrently.
     pub fn new(
         scheduler: SchedulerBehavior,
-        status_collector: StatusCollector,
+        status_sender: StatusSender,
         global_semaphore: Option<Arc<Semaphore>>,
     ) -> Self {
         Self {
             scheduler,
-            status_collector,
+            status_sender,
             global_semaphore,
         }
     }

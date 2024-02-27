@@ -11,7 +11,7 @@ use crate::{
         fail_wrapper::FailingSpawner, inprocess::InProcessSpawner, SpawnedTask, Spawner, TaskError,
     },
     task_status::{StatusCollector, StatusUpdateData},
-    LogCollector, SubTask, SubtaskId, TaskDefWithOutput,
+    LogSender, SubTask, SubtaskId, TaskDefWithOutput,
 };
 
 struct TestTask<SPAWNER: Spawner> {
@@ -66,7 +66,7 @@ impl<SPAWNER: Spawner> SubTask for TestSubTaskDef<SPAWNER> {
     async fn spawn(
         &self,
         task_id: SubtaskId,
-        logs: Option<LogCollector>,
+        logs: Option<LogSender>,
     ) -> Result<Box<dyn SpawnedTask>, Report<TaskError>> {
         if self.fail_serialize {
             Err(FailedSerializeError {}).change_context(TaskError::TaskGenerationFailed)?;
@@ -147,7 +147,7 @@ async fn normal_run() {
             max_retries: 2,
             slow_task_behavior: SlowTaskBehavior::Wait,
         },
-        status.clone(),
+        status.sender.clone(),
         None,
     );
 
@@ -175,7 +175,7 @@ async fn single_stage() {
             max_retries: 2,
             slow_task_behavior: SlowTaskBehavior::Wait,
         },
-        status.clone(),
+        status.sender.clone(),
         None,
     );
 
@@ -230,7 +230,7 @@ async fn tail_retry() {
             max_retries: 2,
             slow_task_behavior: SlowTaskBehavior::RerunLastN(2),
         },
-        status.clone(),
+        status.sender.clone(),
         None,
     );
 
@@ -284,7 +284,7 @@ async fn retry_failures() {
             max_retries: 2,
             slow_task_behavior: SlowTaskBehavior::Wait,
         },
-        status.clone(),
+        status.sender.clone(),
         None,
     );
 
@@ -338,7 +338,7 @@ async fn permanent_failure_task_error() {
             max_retries: 2,
             slow_task_behavior: SlowTaskBehavior::Wait,
         },
-        status.clone(),
+        status.sender.clone(),
         None,
     );
 
@@ -398,7 +398,7 @@ async fn too_many_retries() {
             max_retries: 2,
             slow_task_behavior: SlowTaskBehavior::Wait,
         },
-        status.clone(),
+        status.sender.clone(),
         None,
     );
 
@@ -451,7 +451,7 @@ async fn task_panicked() {
             max_retries: 2,
             slow_task_behavior: SlowTaskBehavior::Wait,
         },
-        status.clone(),
+        status.sender.clone(),
         None,
     );
 
@@ -503,7 +503,7 @@ async fn task_payload_serialize_failure() {
             max_retries: 2,
             slow_task_behavior: SlowTaskBehavior::Wait,
         },
-        status.clone(),
+        status.sender.clone(),
         None,
     );
 
@@ -557,7 +557,7 @@ async fn max_concurrent_tasks() {
             max_retries: 2,
             slow_task_behavior: SlowTaskBehavior::Wait,
         },
-        status.clone(),
+        status.sender.clone(),
         None,
     );
 
@@ -608,7 +608,7 @@ async fn wait_unordered() {
             max_retries: 2,
             slow_task_behavior: SlowTaskBehavior::Wait,
         },
-        status.clone(),
+        status.sender.clone(),
         None,
     );
 

@@ -11,7 +11,7 @@ use tracing::{event, instrument, Level, Span};
 
 use crate::{
     spawn::TaskError, JobManager, JobStageResultReceiver, JobStageTaskSender, SchedulerBehavior,
-    StageArgs, StageError, StatusCollector, SubTask,
+    StageArgs, StageError, StatusSender, SubTask,
 };
 
 type StageTaskHandle = JoinHandle<Result<(), Report<TaskError>>>;
@@ -21,7 +21,7 @@ pub struct Job {
     scheduler: SchedulerBehavior,
     job_semaphore: Arc<Semaphore>,
     global_semaphore: Option<Arc<Semaphore>>,
-    status_collector: StatusCollector,
+    status_sender: StatusSender,
     stage_task_tx: Sender<(usize, StageTaskHandle)>,
     done: tokio::sync::watch::Sender<()>,
     num_stages: usize,
@@ -47,7 +47,7 @@ impl Job {
             scheduler,
             job_semaphore,
             global_semaphore: manager.global_semaphore.clone(),
-            status_collector: manager.status_collector.clone(),
+            status_sender: manager.status_sender.clone(),
             stage_task_tx,
             done: done_tx,
             stage_monitor_task: Some(stage_monitor_task),
@@ -85,7 +85,7 @@ impl Job {
             new_task_rx,
             subtask_result_tx,
             scheduler: self.scheduler.clone(),
-            status_collector: self.status_collector.clone(),
+            status_sender: self.status_sender.clone(),
             job_semaphore: self.job_semaphore.clone(),
             global_semaphore: self.global_semaphore.clone(),
         };
