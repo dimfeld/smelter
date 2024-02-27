@@ -1,5 +1,5 @@
-// #![warn(missing_docs)]
-// #![warn(clippy::missing_docs_in_private_items)]
+#![warn(missing_docs)]
+#![warn(clippy::missing_docs_in_private_items)]
 
 //! Spawn Smelter jobs as local tasks. This is mostly useful for testing and development.
 
@@ -11,12 +11,17 @@ use smelter_worker::{WorkerInput, WorkerResult};
 
 pub mod spawner;
 
+/// The input and output locations of a task's data. A task can use this to read and write
+/// to the proper locations.
 pub struct LocalWorkerInfo {
+    /// Where the task's input data should be found.
     pub input: PathBuf,
+    /// Where the task should place its output data.
     pub output: PathBuf,
 }
 
 impl LocalWorkerInfo {
+    /// Read the LocalWorkerInfo from the environment
     pub fn from_env() -> Result<Self, Report<TaskError>> {
         let input = std::env::var("INPUT_FILE").change_context(TaskError::Failed(false))?;
         let output = std::env::var("OUTPUT_FILE").change_context(TaskError::Failed(false))?;
@@ -27,6 +32,8 @@ impl LocalWorkerInfo {
         })
     }
 
+    /// Read the input file. You can also read manually from [`input`] if it makes
+    /// sense for your task.
     pub async fn read_input<PAYLOAD: serde::de::DeserializeOwned + Send + 'static>(
         &self,
     ) -> Result<WorkerInput<PAYLOAD>, Report<TaskError>> {
@@ -45,6 +52,8 @@ impl LocalWorkerInfo {
         Ok(worker_input)
     }
 
+    /// Write the output file. You can also write manually to [`output`] if it makes
+    /// sense for your task.
     pub async fn write_output<DATA>(
         &self,
         result: impl Into<WorkerResult<DATA>>,

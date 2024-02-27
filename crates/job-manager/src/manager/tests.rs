@@ -103,7 +103,7 @@ impl<SPAWNER: Spawner> TestTask<SPAWNER> {
                     .unwrap_or(false);
 
                 stage_tx
-                    .add_subtask(TestSubTaskDef {
+                    .push(TestSubTaskDef {
                         spawn_name: format!("test-{stage_index}-{task_index}"),
                         spawner: self.spawner.clone(),
                         fail_serialize,

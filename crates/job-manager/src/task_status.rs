@@ -101,6 +101,7 @@ impl StatusCollector {
         collector
     }
 
+    /// Create a copy of this collector that only sends logs
     pub fn as_log_collector(&self, task_id: SubtaskId) -> Option<LogCollector> {
         self.keep_logs.then(|| LogCollector {
             task_id,
@@ -108,6 +109,7 @@ impl StatusCollector {
         })
     }
 
+    /// Add a status update to the buffer.
     pub fn add(&self, task_id: SubtaskId, data: impl Into<StatusUpdateData>) {
         self.tx
             .send(StatusUpdateOp::Item(StatusUpdateItem {
@@ -118,18 +120,21 @@ impl StatusCollector {
             .ok();
     }
 
+    /// Return a copy of the status updates, starting from the beginning.
     pub async fn read(&self) -> Vec<StatusUpdateItem> {
         let (tx, rx) = oneshot::channel();
         self.tx.send(StatusUpdateOp::ReadFrom((tx, 0))).ok();
         rx.await.unwrap_or_default()
     }
 
+    /// Return a copy of the status updates, starting from the requested index.
     pub async fn read_from(&self, start: usize) -> Vec<StatusUpdateItem> {
         let (tx, rx) = oneshot::channel();
         self.tx.send(StatusUpdateOp::ReadFrom((tx, start))).ok();
         rx.await.unwrap_or_default()
     }
 
+    /// Return the status updates and clear the current buffer.
     pub async fn take(&self) -> Vec<StatusUpdateItem> {
         let (tx, rx) = oneshot::channel();
         self.tx.send(StatusUpdateOp::Take(tx)).ok();

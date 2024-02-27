@@ -1,7 +1,9 @@
 #[derive(Debug, Clone)]
 pub struct SchedulerBehavior {
-    /// The maximum number of tasks to run at once. Leave this as `None` to run them as fast as
-    /// possible, leaving the limits to the underlying task runtime.
+    /// The maximum number of tasks to run at once in a job. Leave this as `None` to run
+    /// them as fast as possible, leaving the limits to the underlying task runtime.
+    /// Cross-job limits can be achieved using by passing `global_semaphore` to
+    /// [JobManager::new].
     pub max_concurrent_tasks: Option<usize>,
     /// The maximum number of time to retry a task.
     pub max_retries: usize,

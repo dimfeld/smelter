@@ -117,7 +117,7 @@ impl Job {
     ) -> JobStageResultReceiver<SUBTASK> {
         let (tx, rx) = self.add_stage().await;
         for task in tasks {
-            tx.add_subtask(task).await;
+            tx.push(task).await;
         }
         rx
     }

@@ -15,13 +15,18 @@ use smelter_worker::{SubtaskId, WorkerInput};
 use tokio::io::{AsyncBufReadExt, AsyncReadExt, AsyncWriteExt};
 use tokio_stream::wrappers::LinesStream;
 
+/// Spawn a local job
 #[derive(Default)]
 pub struct LocalSpawner {
+    /// If true, the spawned command will be parsed and executed by a shell.
     pub shell: bool,
+    /// A temporary directory to use instead of the system default.
     pub tmpdir: Option<PathBuf>,
 }
 
 impl LocalSpawner {
+    /// Spawn the provided command. This gives more control over the spawned process
+    /// than the method provided by the [Spawner] trait.
     pub async fn spawn_command(
         &self,
         task_id: SubtaskId,

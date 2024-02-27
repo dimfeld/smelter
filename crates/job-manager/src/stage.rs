@@ -43,7 +43,7 @@ impl<SUBTASK: SubTask> Debug for JobStageTaskSender<SUBTASK> {
 impl<SUBTASK: SubTask> JobStageTaskSender<SUBTASK> {
     /// Add a subtask to the stage.
     #[instrument(level = "debug")]
-    pub async fn add_subtask(&self, task: SUBTASK) {
+    pub async fn push(&self, task: SUBTASK) {
         self.tx.send_async(task).await.ok();
     }
 
@@ -51,7 +51,7 @@ impl<SUBTASK: SubTask> JobStageTaskSender<SUBTASK> {
     #[instrument(level = "debug")]
     pub async fn extend(&mut self, tasks: impl IntoIterator<Item = SUBTASK> + Debug) {
         for task in tasks {
-            self.add_subtask(task).await;
+            self.push(task).await;
         }
     }
 
@@ -79,6 +79,16 @@ impl<SUBTASK: SubTask> JobStageResultReceiver<SUBTASK> {
     /// Return true if all the jobs in this stage have finished, and there will be no more jobs.
     pub fn is_finished(&self) -> bool {
         self.rx.is_disconnected() && self.rx.is_empty()
+    }
+
+    /// Return true if we know there will be no more jobs pushed to this stage. Note that
+    /// failed jobs may still be retried after this returns true.
+    pub fn no_new_tasks(&self) -> bool {
+        self.rx.is_disconnected()
+    }
+
+    pub async fn recv(&self) -> Option<Result<TaskDefWithOutput<SUBTASK>, Report<TaskError>>> {
+        self.rx.recv_async().await.ok()
     }
 
     /// Wait for all the tasks in the stage to finish and return their results. Note that this will
