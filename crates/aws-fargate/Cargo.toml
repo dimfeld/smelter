@@ -11,14 +11,19 @@ aws-config = { version = "1.1.7", optional = true, features = ["behavior-version
 aws-sdk-ecs = { version = "1.16.0", optional = true }
 aws-sdk-s3 = "1.17.0"
 error-stack = "0.4.1"
+eyre = "0.6.12"
 rand = "0.8.5"
 serde = "1.0.197"
 serde_json = "1.0.114"
 smelter-job-manager = { path = "../job-manager", optional = true }
+smelter-worker = { path = "../worker", optional = true }
+thiserror = "1.0.57"
 tokio = { version = "1.36.0", features = ["time"] }
+tracing = "0.1.40"
 url = "2.5.0"
 
 [features]
-default = ["worker", "spawner"]
+default = ["worker", "spawner", "opentelemetry"]
 spawner = ["dep:aws-sdk-ecs", "dep:aws-config", "dep:smelter-job-manager"]
-worker = []
+worker = ["dep:smelter-worker"]
+opentelemetry = ["smelter-worker/opentelemetry"]

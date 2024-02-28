@@ -3,7 +3,7 @@
 
 //! Spawn Smelter jobs as processes running on the same system.
 
-use std::path::PathBuf;
+use std::{fmt::Debug, path::PathBuf};
 
 use error_stack::{Report, ResultExt};
 use smelter_job_manager::TaskError;
@@ -60,7 +60,7 @@ impl LocalWorkerInfo {
 
     /// Write the output file. You can also write manually to [`output`] if it makes
     /// sense for your task.
-    pub async fn write_output<DATA>(
+    pub async fn write_output<DATA: Debug>(
         &self,
         result: impl Into<WorkerResult<DATA>>,
     ) -> Result<(), Report<TaskError>>

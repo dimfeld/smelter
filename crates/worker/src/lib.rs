@@ -1,6 +1,6 @@
 #[cfg(feature = "opentelemetry")]
 use std::collections::HashMap;
-use std::io::Read;
+use std::{fmt::Debug, io::Read};
 
 #[cfg(feature = "opentelemetry")]
 use opentelemetry::sdk::propagation::TraceContextPropagator;
@@ -25,6 +25,34 @@ impl std::fmt::Display for SubtaskId {
     }
 }
 
+#[cfg(feature = "opentelemetry")]
+/// Encode the current trace context so that it can be passed across process lines.
+pub fn get_trace_context() -> HashMap<String, String> {
+    use opentelemetry::propagation::TextMapPropagator;
+    use tracing_opentelemetry::OpenTelemetrySpanExt;
+
+    let span = tracing::Span::current();
+    let context = span.context();
+    let propagator = TraceContextPropagator::new();
+    let mut fields = HashMap::new();
+    propagator.inject_context(&context, &mut fields);
+    fields
+}
+
+pub fn propagate_tracing_context(trace_context: &HashMap<String, String>) {
+    #![allow(unused_variables)]
+    #[cfg(feature = "opentelemetry")]
+    {
+        use opentelemetry::propagation::TextMapPropagator;
+        use tracing_opentelemetry::OpenTelemetrySpanExt;
+
+        let propagator = TraceContextPropagator::new();
+        let context = propagator.extract(trace_context);
+        let span = tracing::Span::current();
+        span.set_parent(context);
+    }
+}
+
 #[derive(Debug)]
 #[cfg_attr(feature = "worker-side", derive(Serialize))]
 #[cfg_attr(feature = "spawner-side", derive(Deserialize))]
@@ -38,23 +66,9 @@ pub struct WorkerInput<T> {
 
 #[cfg(feature = "spawner-side")]
 impl<T> WorkerInput<T> {
-    #[cfg(feature = "opentelemetry")]
-    /// Encode the current trace context so that it can be passed across process lines.
-    fn get_trace_context() -> HashMap<String, String> {
-        use opentelemetry::propagation::TextMapPropagator;
-        use tracing_opentelemetry::OpenTelemetrySpanExt;
-
-        let span = tracing::Span::current();
-        let context = span.context();
-        let propagator = TraceContextPropagator::new();
-        let mut fields = HashMap::new();
-        propagator.inject_context(&context, &mut fields);
-        fields
-    }
-
     pub fn new(task_id: SubtaskId, input: T) -> Self {
         #[cfg(feature = "opentelemetry")]
-        let trace_context = Self::get_trace_context();
+        let trace_context = get_trace_context();
 
         Self {
             task_id,
@@ -70,13 +84,7 @@ impl<T: DeserializeOwned + 'static> WorkerInput<T> {
     pub fn propagate_tracing_context(&self) {
         #[cfg(feature = "opentelemetry")]
         {
-            use opentelemetry::propagation::TextMapPropagator;
-            use tracing_opentelemetry::OpenTelemetrySpanExt;
-
-            let propagator = TraceContextPropagator::new();
-            let context = propagator.extract(&self.trace_context);
-            let span = tracing::Span::current();
-            span.set_parent(context);
+            propagate_tracing_context(&self.trace_context);
         }
     }
 
@@ -101,7 +109,7 @@ pub struct WorkerError {
 impl WorkerError {
     /// Create a [WorkerError] from any [Error](std:error::Error).
     #[cfg(feature = "worker-side")]
-    pub fn from_error(retryable: bool, error: impl std::fmt::Debug) -> Self {
+    pub fn from_error(retryable: bool, error: impl Debug) -> Self {
         Self {
             retryable,
             error: format!("{:?}", error),
@@ -123,13 +131,14 @@ impl<E: std::error::Error> From<E> for WorkerError {
 
 #[cfg_attr(feature = "worker-side", derive(Serialize))]
 #[cfg_attr(feature = "spawner-side", derive(Deserialize))]
+#[derive(Debug)]
 #[serde(tag = "type", content = "data", rename_all = "snake_case")]
-pub enum WorkerResult<T> {
+pub enum WorkerResult<T: Debug> {
     Ok(T),
     Err(WorkerError),
 }
 
-impl<T, E: std::error::Error> From<Result<T, E>> for WorkerResult<T> {
+impl<T: Debug, E: std::error::Error> From<Result<T, E>> for WorkerResult<T> {
     fn from(res: Result<T, E>) -> Self {
         match res {
             Ok(r) => WorkerResult::Ok(r),
@@ -138,7 +147,7 @@ impl<T, E: std::error::Error> From<Result<T, E>> for WorkerResult<T> {
     }
 }
 
-impl<T> From<WorkerResult<T>> for Result<T, WorkerError> {
+impl<T: Debug> From<WorkerResult<T>> for Result<T, WorkerError> {
     fn from(r: WorkerResult<T>) -> Result<T, WorkerError> {
         match r {
             WorkerResult::Ok(r) => Ok(r),
@@ -148,7 +157,7 @@ impl<T> From<WorkerResult<T>> for Result<T, WorkerError> {
 }
 
 #[cfg(feature = "spawner-side")]
-impl<T: DeserializeOwned> WorkerResult<T> {
+impl<T: Debug + DeserializeOwned> WorkerResult<T> {
     pub fn parse(data: &[u8]) -> Result<T, WorkerError> {
         match serde_json::from_slice::<WorkerResult<T>>(data) {
             Ok(WorkerResult::Ok(r)) => Ok(r),

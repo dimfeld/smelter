@@ -2465,11 +2465,15 @@ dependencies = [
  "aws-sdk-ecs",
  "aws-sdk-s3",
  "error-stack",
+ "eyre",
  "rand",
  "serde",
  "serde_json",
  "smelter-job-manager",
+ "smelter-worker",
+ "thiserror",
  "tokio",
+ "tracing",
  "url",
 ]
 

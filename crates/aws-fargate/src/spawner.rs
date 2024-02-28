@@ -8,8 +8,9 @@ use aws_sdk_s3::primitives::ByteStream;
 use error_stack::{Report, ResultExt};
 use serde::Serialize;
 use smelter_job_manager::{SpawnedTask, SubtaskId, TaskError};
+use smelter_worker::get_trace_context;
 
-use crate::{INPUT_LOCATION_VAR, OUTPUT_LOCATION_VAR};
+use crate::{INPUT_LOCATION_VAR, OTEL_CONTEXT_VAR, OUTPUT_LOCATION_VAR, SUBTASK_ID_VAR};
 
 pub struct FargateSpawner {
     /// A base path in S3 to store input and output data.
@@ -44,10 +45,34 @@ impl FargateSpawner {
         let input_path = format!("{}/{}-input-{}.json", self.s3_data_path, task_id, rnd);
         let output_path = format!("{}/{}-output-{}.json", self.s3_data_path, task_id, rnd);
 
-        let mut env = vec![KeyValuePair::builder()
-            .name(OUTPUT_LOCATION_VAR)
-            .value(&output_path)
-            .build()];
+        let task_id_json = serde_json::to_string(&task_id)
+            .change_context(TaskError::TaskGenerationFailed)
+            .attach_printable("Serializing task ID")?;
+
+        let mut env = vec![
+            KeyValuePair::builder()
+                .name(OUTPUT_LOCATION_VAR)
+                .value(&output_path)
+                .build(),
+            KeyValuePair::builder()
+                .name(SUBTASK_ID_VAR)
+                .value(task_id_json)
+                .build(),
+        ];
+
+        #[cfg(feature = "opentelemetry")]
+        {
+            let trace_context_str = serde_json::to_string(&get_trace_context())
+                .change_context(TaskError::TaskGenerationFailed)
+                .attach_printable("Serializing opentelemetry context")?;
+
+            env.push(
+                KeyValuePair::builder()
+                    .name(OTEL_CONTEXT_VAR)
+                    .value(&trace_context_str)
+                    .build(),
+            );
+        }
 
         if input_data.type_id() != std::any::TypeId::of::<()>() {
             env.push(
