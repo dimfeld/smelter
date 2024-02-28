@@ -6,10 +6,15 @@ edition = "2021"
 # See more keys and their definitions at https://doc.rust-lang.org/cargo/reference/manifest.html
 
 [dependencies]
-aws-config = { version = "1.1.7", features = ["behavior-version-latest"] }
-aws-sdk-ecs = "1.16.0"
+async-trait = "0.1.77"
+aws-config = { version = "1.1.7", optional = true, features = ["behavior-version-latest"] }
+aws-sdk-ecs = { version = "1.16.0", optional = true }
+error-stack = "0.4.1"
+serde = "1.0.197"
+serde_json = "1.0.114"
+smelter-job-manager = { path = "../job-manager", optional = true }
 
 [features]
 default = ["worker", "spawner"]
-spawner = []
+spawner = ["dep:aws-sdk-ecs", "dep:aws-config", "dep:smelter-job-manager"]
 worker = []
