@@ -13,6 +13,7 @@ error-stack = "0.4.1"
 serde = "1.0.197"
 serde_json = "1.0.114"
 smelter-job-manager = { path = "../job-manager", optional = true }
+tokio = { version = "1.36.0", features = ["time"] }
 
 [features]
 default = ["worker", "spawner"]
