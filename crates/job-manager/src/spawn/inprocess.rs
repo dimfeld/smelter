@@ -10,7 +10,7 @@ use serde::Serialize;
 use smelter_worker::{WorkerError, WorkerResult};
 use tokio::{sync::oneshot, task::JoinHandle};
 
-use super::{SpawnedTask, Spawner, TaskError};
+use super::{SpawnedTask, TaskError};
 #[cfg(test)]
 use crate::test_util::setup_test_tracing;
 use crate::{LogSender, SubtaskId};
@@ -27,36 +27,35 @@ where
     FUNC: FnOnce(InProcessTaskInfo) -> F + Send + Sync + Clone + 'static,
 {
     task_fn: FUNC,
+    pub fail_to_spawn: bool,
 }
 
 impl<F, FUNC> InProcessSpawner<F, FUNC>
 where
-    F: Future<Output = Result<String, TaskError>> + 'static,
+    F: Future<Output = Result<String, TaskError>> + Send + 'static,
     FUNC: FnOnce(InProcessTaskInfo) -> F + Send + Sync + Clone + 'static,
 {
     pub fn new(task_fn: FUNC) -> Self {
         #[cfg(test)]
         setup_test_tracing();
 
-        Self { task_fn }
+        Self {
+            task_fn,
+            fail_to_spawn: false,
+        }
     }
-}
 
-#[async_trait]
-impl<F, FUNC> Spawner for InProcessSpawner<F, FUNC>
-where
-    F: Future<Output = Result<String, TaskError>> + Send + Sync,
-    FUNC: FnOnce(InProcessTaskInfo) -> F + Send + Sync + Clone + 'static,
-{
-    type SpawnedTask = InProcessSpawnedTask;
-
-    async fn spawn(
+    pub async fn spawn(
         &self,
         task_id: SubtaskId,
         task_name: Cow<'static, str>,
-        _log_collector: Option<LogSender>,
+        _log_sender: Option<LogSender>,
         input: impl Serialize + Send,
-    ) -> Result<Self::SpawnedTask, Report<TaskError>> {
+    ) -> Result<InProcessSpawnedTask, Report<TaskError>> {
+        if self.fail_to_spawn {
+            return Err(Report::new(TaskError::DidNotStart(true)));
+        }
+
         let task_fn = self.task_fn.clone();
         let input = serde_json::to_vec(&input).change_context(TaskError::TaskGenerationFailed)?;
         let task = InProcessSpawnedTask {
@@ -105,7 +104,7 @@ impl SpawnedTask for InProcessSpawnedTask {
         let result = match &result {
             Ok(Ok(r)) => WorkerResult::Ok(r),
             Ok(Err(e)) => WorkerResult::Err(WorkerError::from_error(e.retryable(), e)),
-            Err(e) => WorkerResult::Err(WorkerError::from_error(false, e)),
+            Err(e) => WorkerResult::Err(WorkerError::from_error(true, e)),
         };
 
         let result = serde_json::to_vec(&result).change_context(TaskError::Failed(true))?;
@@ -176,7 +175,6 @@ mod test {
     use futures::{StreamExt, TryStreamExt};
 
     use super::*;
-    use crate::spawn::Spawner;
 
     #[tokio::test]
     async fn output_collector() {

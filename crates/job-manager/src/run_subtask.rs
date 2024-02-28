@@ -8,9 +8,7 @@ use tracing::{instrument, Level};
 use super::SubtaskId;
 use crate::{
     spawn::TaskError,
-    task_status::{
-        StatusCollector, StatusUpdateData, StatusUpdateSpawnedData, StatusUpdateSuccessData,
-    },
+    task_status::{StatusUpdateData, StatusUpdateSpawnedData, StatusUpdateSuccessData},
     SerializedWorkerFailure, StatusSender, SubTask,
 };
 
@@ -120,11 +118,12 @@ mod test {
     use super::*;
     use crate::{
         manager::tests::TestSubTaskDef,
-        spawn::{fail_wrapper::FailingSpawner, inprocess::InProcessSpawner, TaskError},
-        Spawner,
+        spawn::{inprocess::InProcessSpawner, TaskError},
+        tests::TestSpawner,
+        StatusCollector,
     };
 
-    fn create_task_input<SPAWNER: Spawner>(
+    fn create_task_input<SPAWNER: TestSpawner>(
         spawner: Arc<SPAWNER>,
     ) -> (
         TestSubTaskDef<SPAWNER>,
@@ -391,12 +390,12 @@ mod test {
 
     #[tokio::test]
     async fn failed_to_spawn() {
-        let spawner = Arc::new(FailingSpawner::new(
-            InProcessSpawner::new(|info| async move { Ok(format!("result {}", info.task_id)) }),
-            |_| Err(TaskError::DidNotStart(true)),
-        ));
+        let mut spawner =
+            InProcessSpawner::new(|info| async move { Ok(format!("result {}", info.task_id)) });
 
-        let (input, status_collector, _cancel_tx, syncs) = create_task_input(spawner);
+        spawner.fail_to_spawn = true;
+
+        let (input, status_collector, _cancel_tx, syncs) = create_task_input(Arc::new(spawner));
 
         let payload = SubtaskPayload {
             input,

@@ -1,20 +1,49 @@
 use std::{borrow::Cow, fmt::Debug, sync::Arc, time::Duration};
 
 use error_stack::{Report, ResultExt};
+use futures::Future;
+use serde::Serialize;
 use thiserror::Error;
 use tracing::{event, info, Level};
 
 use crate::{
+    inprocess::{InProcessSpawnedTask, InProcessTaskInfo},
     manager::JobManager,
     scheduler::{SchedulerBehavior, SlowTaskBehavior},
-    spawn::{
-        fail_wrapper::FailingSpawner, inprocess::InProcessSpawner, SpawnedTask, Spawner, TaskError,
-    },
+    spawn::{inprocess::InProcessSpawner, SpawnedTask, TaskError},
     task_status::{StatusCollector, StatusUpdateData},
     LogSender, SubTask, SubtaskId, TaskDefWithOutput,
 };
 
-struct TestTask<SPAWNER: Spawner> {
+#[async_trait::async_trait]
+pub trait TestSpawner: Send + Sync + 'static {
+    async fn test_spawn(
+        &self,
+        task_id: SubtaskId,
+        task_name: Cow<'static, str>,
+        _log_sender: Option<LogSender>,
+        input: impl Serialize + Send,
+    ) -> Result<InProcessSpawnedTask, Report<TaskError>>;
+}
+
+#[async_trait::async_trait]
+impl<F, FUNC> TestSpawner for InProcessSpawner<F, FUNC>
+where
+    F: Future<Output = Result<String, TaskError>> + Send + 'static,
+    FUNC: FnOnce(InProcessTaskInfo) -> F + Send + Sync + Clone + 'static,
+{
+    async fn test_spawn(
+        &self,
+        task_id: SubtaskId,
+        task_name: Cow<'static, str>,
+        log_sender: Option<LogSender>,
+        input: impl Serialize + Send,
+    ) -> Result<InProcessSpawnedTask, Report<TaskError>> {
+        self.spawn(task_id, task_name, log_sender, input).await
+    }
+}
+
+struct TestTask<SPAWNER: TestSpawner> {
     num_stages: usize,
     tasks_per_stage: usize,
     spawner: Arc<SPAWNER>,
@@ -22,13 +51,13 @@ struct TestTask<SPAWNER: Spawner> {
     expect_failure: bool,
 }
 
-pub(crate) struct TestSubTaskDef<SPAWNER: Spawner> {
+pub(crate) struct TestSubTaskDef<SPAWNER: TestSpawner> {
     pub spawn_name: String,
     pub fail_serialize: bool,
     pub spawner: Arc<SPAWNER>,
 }
 
-impl<SPAWNER: Spawner> Debug for TestSubTaskDef<SPAWNER> {
+impl<SPAWNER: TestSpawner> Debug for TestSubTaskDef<SPAWNER> {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.debug_struct("TestSubTaskDef")
             .field("spawn_name", &self.spawn_name)
@@ -37,7 +66,7 @@ impl<SPAWNER: Spawner> Debug for TestSubTaskDef<SPAWNER> {
     }
 }
 
-impl<SPAWNER: Spawner> Clone for TestSubTaskDef<SPAWNER> {
+impl<SPAWNER: TestSpawner> Clone for TestSubTaskDef<SPAWNER> {
     fn clone(&self) -> Self {
         Self {
             spawn_name: self.spawn_name.clone(),
@@ -56,7 +85,7 @@ struct TestError {}
 struct FailedSerializeError {}
 
 #[async_trait::async_trait]
-impl<SPAWNER: Spawner> SubTask for TestSubTaskDef<SPAWNER> {
+impl<SPAWNER: TestSpawner> SubTask for TestSubTaskDef<SPAWNER> {
     type Output = String;
 
     fn description(&self) -> std::borrow::Cow<'static, str> {
@@ -74,7 +103,7 @@ impl<SPAWNER: Spawner> SubTask for TestSubTaskDef<SPAWNER> {
 
         let task = self
             .spawner
-            .spawn(
+            .test_spawn(
                 task_id,
                 Cow::from(self.spawn_name.clone()),
                 logs,
@@ -86,7 +115,7 @@ impl<SPAWNER: Spawner> SubTask for TestSubTaskDef<SPAWNER> {
     }
 }
 
-impl<SPAWNER: Spawner> TestTask<SPAWNER> {
+impl<SPAWNER: TestSpawner> TestTask<SPAWNER> {
     async fn run(
         &self,
         manager: &JobManager,
@@ -425,16 +454,12 @@ async fn too_many_retries() {
 
 #[tokio::test]
 async fn task_panicked() {
-    let spawner = Arc::new(FailingSpawner::new(
-        InProcessSpawner::new(|info| async move { Ok(format!("result {}", info.task_id)) }),
-        |info| {
-            if info.task_id.task == 2 && info.task_id.try_num == 0 {
-                panic!("test panic")
-            }
-
-            Ok(())
-        },
-    ));
+    let spawner = Arc::new(InProcessSpawner::new(|info| async move {
+        if info.task_id.task == 2 && info.task_id.try_num == 0 {
+            panic!("test panic")
+        }
+        Ok(format!("result {}", info.task_id))
+    }));
 
     let task_data = TestTask {
         num_stages: 2,

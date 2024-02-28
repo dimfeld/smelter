@@ -11,7 +11,7 @@ use error_stack::{Report, ResultExt};
 use futures::stream::TryStreamExt;
 use rand::Rng;
 use serde::Serialize;
-use smelter_job_manager::{LogSender, SpawnedTask, Spawner, TaskError};
+use smelter_job_manager::{LogSender, SpawnedTask, TaskError};
 use smelter_worker::{SubtaskId, WorkerInput};
 use tokio::io::{AsyncBufReadExt, AsyncReadExt, AsyncWriteExt};
 use tokio_stream::wrappers::LinesStream;
@@ -19,16 +19,13 @@ use tokio_stream::wrappers::LinesStream;
 /// Spawn a local job
 #[derive(Default)]
 pub struct LocalSpawner {
-    /// If true, the spawned command will be parsed and executed by a shell.
-    pub shell: bool,
     /// A temporary directory to use instead of the system default.
     pub tmpdir: Option<PathBuf>,
 }
 
 impl LocalSpawner {
-    /// Spawn the provided command. This gives more control over the spawned process
-    /// than the method provided by the [Spawner] trait.
-    pub async fn spawn_command(
+    /// Spawn the provided command.
+    pub async fn spawn(
         &self,
         task_id: SubtaskId,
         log_collector: Option<LogSender>,
@@ -111,31 +108,7 @@ impl LocalSpawner {
     }
 }
 
-#[async_trait::async_trait]
-impl Spawner for LocalSpawner {
-    type SpawnedTask = LocalSpawnedTask;
-
-    async fn spawn(
-        &self,
-        task_id: SubtaskId,
-        task_name: Cow<'static, str>,
-        log_collector: Option<LogSender>,
-        input: impl Serialize + Send,
-    ) -> Result<Self::SpawnedTask, Report<TaskError>> {
-        let (exec_name, args) = if self.shell {
-            ("sh", vec!["-c", task_name.as_ref()])
-        } else {
-            (task_name.as_ref(), vec![])
-        };
-
-        let mut command = tokio::process::Command::new(exec_name);
-        command.args(args);
-
-        self.spawn_command(task_id, log_collector, command, input)
-            .await
-    }
-}
-
+/// A handled to a task spawned by a [LocalSpawner]
 pub struct LocalSpawnedTask {
     input_path: PathBuf,
     output_path: PathBuf,
@@ -221,7 +194,6 @@ mod tests {
     async fn spawn() {
         let dir = tempfile::TempDir::new().expect("Creating temp dir");
         let spawner = LocalSpawner {
-            shell: true,
             tmpdir: Some(dir.path().to_path_buf()),
         };
         let task_id = SubtaskId {
@@ -230,13 +202,10 @@ mod tests {
             try_num: 0,
         };
 
+        let mut cmd = tokio::process::Command::new("sh");
+        cmd.arg("-c").arg("cat $INPUT_FILE > $OUTPUT_FILE");
         let mut task = spawner
-            .spawn(
-                task_id,
-                Cow::from("cat $INPUT_FILE > $OUTPUT_FILE"),
-                None,
-                "test-output",
-            )
+            .spawn(task_id, None, cmd, "test-output")
             .await
             .expect("Spawning task");
 

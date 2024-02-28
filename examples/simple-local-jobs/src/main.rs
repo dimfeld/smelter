@@ -10,8 +10,8 @@ use std::{borrow::Cow, sync::Arc};
 use clap::Parser;
 use error_stack::Report;
 use smelter_job_manager::{
-    Job, JobManager, LogSender, SchedulerBehavior, SpawnedTask, StatusCollector, StatusSender,
-    StatusUpdateData, StatusUpdateOp, SubTask, SubtaskId, TaskError,
+    Job, JobManager, LogSender, SchedulerBehavior, SpawnedTask, StatusSender, StatusUpdateData,
+    StatusUpdateOp, SubTask, SubtaskId, TaskError,
 };
 use smelter_local_jobs::spawner::LocalSpawner;
 use tokio::task::JoinSet;
@@ -196,7 +196,7 @@ impl SubTask for Task {
         command.args(["--mode", self.mode]);
 
         let task = LocalSpawner::default()
-            .spawn_command(task_id, logs, command, &self.input)
+            .spawn(task_id, logs, command, &self.input)
             .await?;
         Ok(Box::new(task))
     }

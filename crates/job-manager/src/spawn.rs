@@ -1,30 +1,8 @@
-pub mod fail_wrapper;
-#[cfg(feature = "inprocess")]
+#[cfg(test)]
 pub mod inprocess;
-
-use std::borrow::Cow;
 
 use error_stack::Report;
 use thiserror::Error;
-
-use crate::{LogSender, SubtaskId};
-
-#[async_trait::async_trait]
-pub trait Spawner: Send + Sync + 'static {
-    type SpawnedTask: SpawnedTask;
-
-    // It would be nice to just pass a dyn Serialize instead, but that makes the trait not
-    // object-safe so it's tricky. There's probably some better way to set this up but it's not too
-    // important for now.
-    /// Spawn a task with the given input. The input is a JSON-serialized version of the task definition.
-    async fn spawn(
-        &self,
-        task_id: SubtaskId,
-        task_name: Cow<'static, str>,
-        log_collector: Option<LogSender>,
-        input: impl serde::Serialize + Send,
-    ) -> Result<Self::SpawnedTask, Report<TaskError>>;
-}
 
 #[derive(Debug, Error)]
 #[error("Stage {0} failed")]

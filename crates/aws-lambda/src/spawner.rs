@@ -3,7 +3,7 @@ use std::borrow::Cow;
 use async_trait::async_trait;
 use error_stack::Report;
 
-use super::{SpawnedTask, Spawner, TaskError};
+use super::{SpawnedTask, TaskError};
 use crate::manager::SubtaskId;
 
 pub struct LambdaSpawner {
@@ -11,15 +11,13 @@ pub struct LambdaSpawner {
 }
 
 #[async_trait]
-impl Spawner for LambdaSpawner {
-    type SpawnedTask = SpawnedLambda;
-
+impl LambdaSpawner {
     async fn spawn(
         &self,
         task_id: SubtaskId,
         task_name: Cow<'static, str>,
         input: Vec<u8>,
-    ) -> Result<Self::SpawnedTask, Report<TaskError>> {
+    ) -> Result<Box<dyn SpawnedTask>, Report<TaskError>> {
         todo!()
     }
 }
