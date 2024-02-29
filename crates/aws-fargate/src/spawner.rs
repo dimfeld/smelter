@@ -2,7 +2,8 @@ use std::{any::Any, time::Duration};
 
 use async_trait::async_trait;
 use aws_sdk_ecs::types::{
-    Container, ContainerOverride, EphemeralStorage, KeyValuePair, Task, TaskOverride,
+    AssignPublicIp, AwsVpcConfiguration, Container, ContainerOverride, EphemeralStorage,
+    KeyValuePair, NetworkConfiguration, Task, TaskOverride,
 };
 use aws_sdk_s3::primitives::ByteStream;
 use error_stack::{Report, ResultExt};
@@ -11,6 +12,36 @@ use smelter_job_manager::{SpawnedTask, SubtaskId, TaskError};
 use smelter_worker::get_trace_context;
 
 use crate::{INPUT_LOCATION_VAR, OTEL_CONTEXT_VAR, OUTPUT_LOCATION_VAR, SUBTASK_ID_VAR};
+
+#[derive(Debug, Clone, Default)]
+pub struct FargateTaskArgs {
+    /// The task definition to run
+    pub task_definition: String,
+    /// The cluster to run on, if not the default
+    pub cluster: Option<String>,
+    /// Inject environment variables into the container
+    pub env: Vec<(String, String)>,
+    /// Override the container's default command
+    pub command: Vec<String>,
+
+    /// The subnet IDs to use for this task. All subnets must be in the same VPC.
+    /// At least one subnet is required.
+    pub subnets: Vec<String>,
+    /// The security group IDs to use for this task, if not the default security group for the VPC.
+    pub security_groups: Vec<String>,
+    /// If true, give this task a public IP address.
+    pub assign_public_ip: bool,
+
+    /// Override the CPU limit for the container. This is in units of 1024 = 1 vCPU
+    pub cpu: Option<i32>,
+    /// Override the memory limit for the container, in MB
+    pub memory: Option<i32>,
+    /// Override the amount of ephemeral storage available
+    pub ephemeral_storage: Option<EphemeralStorage>,
+
+    /// Wait this amount of time for the task to finish running
+    pub run_timeout: Option<Duration>,
+}
 
 pub struct FargateSpawner {
     /// A base path in S3 to store input and output data.
@@ -100,6 +131,22 @@ impl FargateSpawner {
             .launch_type(aws_sdk_ecs::types::LaunchType::Fargate)
             .task_definition(args.task_definition)
             .set_cluster(args.cluster)
+            .network_configuration(
+                NetworkConfiguration::builder()
+                    .awsvpc_configuration(
+                        AwsVpcConfiguration::builder()
+                            .set_subnets(Some(args.subnets))
+                            .set_security_groups(Some(args.security_groups))
+                            .set_assign_public_ip(Some(if args.assign_public_ip {
+                                AssignPublicIp::Enabled
+                            } else {
+                                AssignPublicIp::Disabled
+                            }))
+                            .build()
+                            .change_context(TaskError::TaskGenerationFailed)?,
+                    )
+                    .build(),
+            )
             .overrides(
                 TaskOverride::builder()
                     .container_overrides(
@@ -152,28 +199,6 @@ impl FargateSpawner {
             .attach_printable("Writing input payload")?;
         Ok(())
     }
-}
-
-#[derive(Debug, Clone, Default)]
-pub struct FargateTaskArgs {
-    /// The task definition to run
-    pub task_definition: String,
-    /// The cluster to run on, if not the default
-    pub cluster: Option<String>,
-    /// Inject environment variables into the container
-    pub env: Vec<(String, String)>,
-    /// Override the container's default command
-    pub command: Vec<String>,
-
-    /// Override the CPU limit for the container. This is in units of 1024 = 1 vCPU
-    pub cpu: Option<i32>,
-    /// Override the memory limit for the container, in MB
-    pub memory: Option<i32>,
-    /// Override the amount of ephemeral storage available
-    pub ephemeral_storage: Option<EphemeralStorage>,
-
-    /// Wait this amount of time for the task to finish running
-    pub run_timeout: Option<Duration>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
