@@ -43,17 +43,28 @@ pub struct FargateTaskArgs {
     pub run_timeout: Option<Duration>,
 }
 
+#[derive(Clone)]
 pub struct FargateSpawner {
     /// A base path in S3 to store input and output data.
     pub s3_data_path: String,
     /// How often to poll a task's status while it runs.
     pub check_interval: Duration,
     /// How long to wait for the task to start before we give up.
-    pub start_timeout: Duration,
+    pub start_timeout: Option<Duration>,
     /// An client from the ECS SDK.
     pub ecs_client: aws_sdk_ecs::Client,
     /// An client from the S3 SDK.
     pub s3_client: aws_sdk_s3::Client,
+}
+
+impl std::fmt::Debug for FargateSpawner {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("FargateSpawner")
+            .field("s3_data_path", &self.s3_data_path)
+            .field("check_interval", &self.check_interval)
+            .field("start_timeout", &self.start_timeout)
+            .finish()
+    }
 }
 
 impl FargateSpawner {
@@ -174,7 +185,9 @@ impl FargateSpawner {
             output_path,
             task,
             check_interval: self.check_interval,
-            start_timeout: self.start_timeout,
+            start_timeout: self
+                .start_timeout
+                .unwrap_or_else(|| Duration::from_secs(120)),
             run_timeout: args.run_timeout,
         })
     }
@@ -198,6 +211,38 @@ impl FargateSpawner {
             .change_context(TaskError::TaskGenerationFailed)
             .attach_printable("Writing input payload")?;
         Ok(())
+    }
+
+    pub fn for_task(&self, args: FargateTaskArgs) -> FargateSpawnerForTask {
+        FargateSpawnerForTask::new(self.clone(), args)
+    }
+}
+
+pub struct FargateSpawnerForTaskInner {
+    spawner: FargateSpawner,
+    args: FargateTaskArgs,
+}
+
+#[derive(Clone)]
+pub struct FargateSpawnerForTask(std::sync::Arc<FargateSpawnerForTaskInner>);
+
+impl FargateSpawnerForTask {
+    pub fn new(spawner: FargateSpawner, args: FargateTaskArgs) -> Self {
+        Self(std::sync::Arc::new(FargateSpawnerForTaskInner {
+            spawner,
+            args,
+        }))
+    }
+
+    pub async fn spawn<T: Serialize + 'static>(
+        &self,
+        task_id: SubtaskId,
+        input_data: &T,
+    ) -> Result<SpawnedFargateContainer, Report<TaskError>> {
+        self.0
+            .spawner
+            .spawn(task_id, self.0.args.clone(), input_data)
+            .await
     }
 }
 

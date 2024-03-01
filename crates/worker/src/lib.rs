@@ -1,6 +1,4 @@
-#[cfg(feature = "opentelemetry")]
-use std::collections::HashMap;
-use std::{fmt::Debug, io::Read};
+use std::{collections::HashMap, fmt::Debug, io::Read};
 
 #[cfg(feature = "opentelemetry")]
 use opentelemetry::sdk::propagation::TraceContextPropagator;
