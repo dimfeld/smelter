@@ -193,7 +193,6 @@ pub(crate) async fn run_tasks_stage<SUBTASK: SubTask>(
             try_num: task_info.try_num as u16,
         };
 
-        eprintln!("{:?}", e);
         if e.current_context().retryable() && task_info.try_num < scheduler.max_retries {
             status_sender.add(task_id, StatusUpdateData::Retry(format!("{e:?}")));
             task_info.try_num += 1;

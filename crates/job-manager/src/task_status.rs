@@ -112,7 +112,6 @@ impl StatusCollector {
             while let Ok(op) = rx.recv_async().await {
                 match op {
                     StatusUpdateOp::Item(item) => {
-                        println!("item: {:?}", item);
                         if keep_logs || !matches!(&item.data, StatusUpdateData::Log { .. }) {
                             items.push(item);
                         }
