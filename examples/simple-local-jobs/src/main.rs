@@ -10,8 +10,8 @@ use std::{borrow::Cow, sync::Arc};
 use clap::Parser;
 use error_stack::Report;
 use smelter_job_manager::{
-    Job, JobManager, LogSender, SchedulerBehavior, SpawnedTask, StatusSender, StatusUpdateData,
-    SubTask, SubtaskId, TaskError,
+    Job, JobManager, LogSender, SchedulerBehavior, SpawnedTask, StatusSender, SubTask, SubtaskId,
+    TaskError,
 };
 use smelter_local_jobs::spawner::LocalSpawner;
 use tokio::task::JoinSet;

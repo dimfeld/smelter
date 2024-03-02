@@ -24,6 +24,15 @@ pub enum StatusUpdateData {
     Success(StatusUpdateSuccessData),
 }
 
+impl StatusUpdateData {
+    pub fn custom_format(
+        &self,
+        format: StatusUpdateCustomFormatOptions,
+    ) -> StatusUpdateDataDisplayCustom {
+        StatusUpdateDataDisplayCustom { format, data: self }
+    }
+}
+
 impl Display for StatusUpdateData {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
@@ -40,6 +49,65 @@ impl Display for StatusUpdateData {
             StatusUpdateData::Cancelled => write!(f, "Cancelled"),
             StatusUpdateData::Success(data) => {
                 write!(f, "Success: {}", String::from_utf8_lossy(&data.output))
+            }
+        }
+    }
+}
+
+#[derive(Debug, Clone, Default)]
+pub struct StatusUpdateCustomFormatOptions {
+    pub spawned_short: bool,
+    pub retry_short: bool,
+    pub failed_short: bool,
+    pub log_short: bool,
+    pub success_short: bool,
+}
+
+pub struct StatusUpdateDataDisplayCustom<'a> {
+    pub format: StatusUpdateCustomFormatOptions,
+    pub data: &'a StatusUpdateData,
+}
+
+impl Display for StatusUpdateDataDisplayCustom<'_> {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self.data {
+            StatusUpdateData::Spawned(data) => {
+                if self.format.spawned_short {
+                    write!(f, "Spawned {}", data.runtime_id)
+                } else {
+                    write!(f, "Spawned ID {}", data.runtime_id)
+                }
+            }
+            StatusUpdateData::Retry(message) => {
+                if self.format.retry_short {
+                    write!(f, "Retry")
+                } else {
+                    write!(f, "Retry: {}", message)
+                }
+            }
+            StatusUpdateData::Failed(message) => {
+                if self.format.failed_short {
+                    write!(f, "Failed")
+                } else {
+                    write!(f, "Failed: {}", message)
+                }
+            }
+            StatusUpdateData::Log { message, stdout } => {
+                if self.format.log_short {
+                    write!(f, "Log: {}", message)
+                } else if *stdout {
+                    write!(f, "Stdout: {}", message)
+                } else {
+                    write!(f, "Stderr: {}", message)
+                }
+            }
+            StatusUpdateData::Cancelled => write!(f, "Cancelled"),
+            StatusUpdateData::Success(data) => {
+                if self.format.success_short {
+                    write!(f, "Success")
+                } else {
+                    write!(f, "Success: {}", String::from_utf8_lossy(&data.output))
+                }
             }
         }
     }
