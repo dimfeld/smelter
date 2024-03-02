@@ -173,6 +173,7 @@ impl<T: Clone + Send + 'static> OutputCollector<T> {
 #[cfg(test)]
 mod test {
     use futures::{StreamExt, TryStreamExt};
+    use uuid::Uuid;
 
     use super::*;
 
@@ -201,10 +202,13 @@ mod test {
             Ok(format!("result {}", info.task_id.task))
         });
 
+        let job = Uuid::from_u128(0x0123456789abcdef);
+
         let tasks = futures::stream::iter(1..=3)
             .map(Ok)
             .and_then(|i| {
                 let task_id = SubtaskId {
+                    job,
                     stage: 0,
                     task: i,
                     try_num: 0,
@@ -224,15 +228,15 @@ mod test {
 
         println!("output: {:?}", outputs);
         assert_eq!(
-            outputs.get("000-00001-00"),
+            outputs.get("00000000-0000-0000-0123-456789abcdef-000-00001-00"),
             Some(&r##"{"type":"ok","data":"result 1"}"##.to_string())
         );
         assert_eq!(
-            outputs.get("000-00002-00"),
+            outputs.get("00000000-0000-0000-0123-456789abcdef-000-00002-00"),
             Some(&r##"{"type":"ok","data":"result 2"}"##.to_string())
         );
         assert_eq!(
-            outputs.get("000-00003-00"),
+            outputs.get("00000000-0000-0000-0123-456789abcdef-000-00003-00"),
             Some(&r##"{"type":"ok","data":"result 3"}"##.to_string())
         );
     }

@@ -8,6 +8,7 @@ use tokio::{
     task::{JoinError, JoinHandle},
 };
 use tracing::{event, instrument, Level, Span};
+use uuid::Uuid;
 
 use crate::{
     spawn::TaskError, JobManager, JobStageResultReceiver, JobStageTaskSender, SchedulerBehavior,
@@ -18,6 +19,7 @@ type StageTaskHandle = JoinHandle<Result<(), Report<TaskError>>>;
 
 /// A job in the system.
 pub struct Job {
+    pub(crate) id: Uuid,
     scheduler: SchedulerBehavior,
     job_semaphore: Arc<Semaphore>,
     global_semaphore: Option<Arc<Semaphore>>,
@@ -44,6 +46,7 @@ impl Job {
         ));
 
         Job {
+            id: Uuid::now_v7(),
             scheduler,
             job_semaphore,
             global_semaphore: manager.global_semaphore.clone(),
@@ -53,6 +56,10 @@ impl Job {
             stage_monitor_task: Some(stage_monitor_task),
             num_stages: 0,
         }
+    }
+
+    pub fn id(&self) -> Uuid {
+        self.id
     }
 
     /// Wait for the job to finish and return any errors.
@@ -80,6 +87,7 @@ impl Job {
         let (new_task_tx, new_task_rx) = flume::bounded(10);
 
         let args = StageArgs {
+            job_id: self.id,
             stage_index,
             parent_span: Span::current(),
             new_task_rx,

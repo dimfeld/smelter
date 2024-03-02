@@ -188,6 +188,8 @@ impl Drop for LocalSpawnedTask {
 
 #[cfg(test)]
 mod tests {
+    use uuid::Uuid;
+
     use super::*;
 
     #[tokio::test]
@@ -197,6 +199,7 @@ mod tests {
             tmpdir: Some(dir.path().to_path_buf()),
         };
         let task_id = SubtaskId {
+            job: Uuid::nil(),
             stage: 0,
             task: 0,
             try_num: 0,

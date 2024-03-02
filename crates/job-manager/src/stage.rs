@@ -6,6 +6,7 @@ use flume::{Receiver, Sender};
 use futures::{stream::FuturesUnordered, FutureExt, StreamExt, TryStreamExt};
 use tokio::sync::Semaphore;
 use tracing::{event, instrument, Level, Span};
+use uuid::Uuid;
 
 use crate::{
     run_subtask::{run_subtask, SubtaskPayload, SubtaskSyncs},
@@ -114,6 +115,7 @@ fn ready_for_tail_retry(
 }
 
 pub(crate) struct StageArgs<SUBTASK: SubTask> {
+    pub job_id: Uuid,
     pub stage_index: usize,
     pub parent_span: Span,
     pub new_task_rx: Receiver<SUBTASK>,
@@ -136,6 +138,7 @@ pub(crate) async fn run_tasks_stage<SUBTASK: SubTask>(
     args: StageArgs<SUBTASK>,
 ) -> Result<(), Report<TaskError>> {
     let StageArgs {
+        job_id: job,
         stage_index,
         new_task_rx,
         subtask_result_tx,
@@ -163,6 +166,7 @@ pub(crate) async fn run_tasks_stage<SUBTASK: SubTask>(
     let mut running_tasks = FuturesUnordered::new();
     let spawn_task = |i: usize, try_num: u16, task: SUBTASK, futures: &mut FuturesUnordered<_>| {
         let task_id = SubtaskId {
+            job,
             stage: stage_index as u16,
             task: i as u32,
             try_num,
@@ -188,6 +192,7 @@ pub(crate) async fn run_tasks_stage<SUBTASK: SubTask>(
                          task_index: usize,
                          task_info: &mut TaskTrackingInfo<SUBTASK>| {
         let task_id = SubtaskId {
+            job,
             stage: stage_index as u16,
             task: task_index as u32,
             try_num: task_info.try_num as u16,
@@ -255,6 +260,7 @@ pub(crate) async fn run_tasks_stage<SUBTASK: SubTask>(
                                     for (i, task) in unfinished.iter_mut() {
                                         status_sender.add(
                                             SubtaskId {
+                                                job,
                                                 stage: stage_index as u16,
                                                 task: *i as u32,
                                                 try_num: task.try_num as u16,

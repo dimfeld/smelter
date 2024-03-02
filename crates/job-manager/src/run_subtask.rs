@@ -119,7 +119,7 @@ mod test {
     use crate::{
         manager::tests::TestSubTaskDef,
         spawn::{inprocess::InProcessSpawner, TaskError},
-        tests::TestSpawner,
+        tests::{TestSpawner, TEST_JOB_UUID},
         StatusCollector,
     };
 
@@ -161,6 +161,7 @@ mod test {
             input,
             status_sender: status_collector.sender.clone(),
             task_id: SubtaskId {
+                job: TEST_JOB_UUID,
                 stage: 0,
                 task: 0,
                 try_num: 0,
@@ -172,7 +173,11 @@ mod test {
             .expect("task result should return Some")
             .expect("task result should be Ok");
 
-        assert_eq!(result.output, "result 000-00000-00", "output");
+        assert_eq!(
+            result.output,
+            format!("result {TEST_JOB_UUID}-000-00000-00"),
+            "output"
+        );
     }
 
     #[tokio::test]
@@ -187,6 +192,7 @@ mod test {
         let payload = SubtaskPayload {
             input,
             task_id: SubtaskId {
+                job: TEST_JOB_UUID,
                 stage: 0,
                 task: 0,
                 try_num: 0,
@@ -244,6 +250,7 @@ mod test {
         let payload = SubtaskPayload {
             input,
             task_id: SubtaskId {
+                job: TEST_JOB_UUID,
                 stage: 0,
                 task: 0,
                 try_num: 0,
@@ -283,7 +290,11 @@ mod test {
             .expect("task should finish")
             .expect("task result should return Some")
             .expect("task result should be Ok");
-        assert_eq!(result.output, "result 000-00000-00", "output location");
+        assert_eq!(
+            result.output,
+            format!("result {TEST_JOB_UUID}-000-00000-00"),
+            "output location"
+        );
     }
 
     #[tokio::test]
@@ -314,6 +325,7 @@ mod test {
         let payload = SubtaskPayload {
             input,
             task_id: SubtaskId {
+                job: TEST_JOB_UUID,
                 stage: 0,
                 task: 0,
                 try_num: 0,
@@ -364,6 +376,7 @@ mod test {
         let payload = SubtaskPayload {
             input,
             task_id: SubtaskId {
+                job: TEST_JOB_UUID,
                 stage: 0,
                 task: 0,
                 try_num: 0,
@@ -400,6 +413,7 @@ mod test {
         let payload = SubtaskPayload {
             input,
             task_id: SubtaskId {
+                job: TEST_JOB_UUID,
                 stage: 0,
                 task: 0,
                 try_num: 0,

@@ -3,12 +3,14 @@ use std::{collections::HashMap, fmt::Debug, io::Read};
 #[cfg(feature = "opentelemetry")]
 use opentelemetry::sdk::propagation::TraceContextPropagator;
 use serde::{de::DeserializeOwned, Deserialize, Serialize};
+use uuid::Uuid;
 
 /// The ID for a subtask, which uniquely identifies it within a [Job].
 #[derive(Debug, Copy, Clone)]
 #[cfg_attr(feature = "worker-side", derive(Serialize))]
 #[cfg_attr(feature = "spawner-side", derive(Deserialize))]
 pub struct SubtaskId {
+    pub job: Uuid,
     /// Which stage the subtask is running on.
     pub stage: u16,
     /// The index of the task within that stage.
@@ -19,7 +21,11 @@ pub struct SubtaskId {
 
 impl std::fmt::Display for SubtaskId {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        write!(f, "{:03}-{:05}-{:02}", self.stage, self.task, self.try_num)
+        write!(
+            f,
+            "{}-{:03}-{:05}-{:02}",
+            self.job, self.stage, self.task, self.try_num
+        )
     }
 }
 

@@ -5,6 +5,7 @@ use futures::Future;
 use serde::Serialize;
 use thiserror::Error;
 use tracing::{event, info, Level};
+use uuid::Uuid;
 
 use crate::{
     inprocess::{InProcessSpawnedTask, InProcessTaskInfo},
@@ -14,6 +15,8 @@ use crate::{
     task_status::{StatusCollector, StatusUpdateData},
     LogSender, SubTask, SubtaskId, TaskDefWithOutput,
 };
+
+pub(crate) const TEST_JOB_UUID: Uuid = Uuid::from_u128(0x01234567890abcdef);
 
 #[async_trait::async_trait]
 pub trait TestSpawner: Send + Sync + 'static {
@@ -121,6 +124,7 @@ impl<SPAWNER: TestSpawner> TestTask<SPAWNER> {
         manager: &JobManager,
     ) -> Result<Vec<TaskDefWithOutput<TestSubTaskDef<SPAWNER>>>, Report<TaskError>> {
         let mut job = manager.new_job();
+        job.id = TEST_JOB_UUID;
         let mut results: Vec<TaskDefWithOutput<TestSubTaskDef<SPAWNER>>> = Vec::new();
 
         for stage_index in 0..self.num_stages {
@@ -220,11 +224,11 @@ async fn single_stage() {
     assert_eq!(
         result,
         vec![
-            "result 000-00000-00".to_string(),
-            "result 000-00001-00".to_string(),
-            "result 000-00002-00".to_string(),
-            "result 000-00003-00".to_string(),
-            "result 000-00004-00".to_string(),
+            format!("result {TEST_JOB_UUID}-000-00000-00"),
+            format!("result {TEST_JOB_UUID}-000-00001-00"),
+            format!("result {TEST_JOB_UUID}-000-00002-00"),
+            format!("result {TEST_JOB_UUID}-000-00003-00"),
+            format!("result {TEST_JOB_UUID}-000-00004-00"),
         ],
     );
 }
@@ -276,11 +280,11 @@ async fn tail_retry() {
     assert_eq!(
         result,
         vec![
-            "result 001-00000-01".to_string(),
-            "result 001-00001-00".to_string(),
-            "result 001-00002-01".to_string(),
-            "result 001-00003-00".to_string(),
-            "result 001-00004-00".to_string(),
+            format!("result {TEST_JOB_UUID}-001-00000-01"),
+            format!("result {TEST_JOB_UUID}-001-00001-00"),
+            format!("result {TEST_JOB_UUID}-001-00002-01"),
+            format!("result {TEST_JOB_UUID}-001-00003-00"),
+            format!("result {TEST_JOB_UUID}-001-00004-00"),
         ],
         "Finished tasks should be the tail retry tasks for 0 and 2"
     );
@@ -330,11 +334,11 @@ async fn retry_failures() {
     assert_eq!(
         result,
         vec![
-            "result 001-00000-02".to_string(),
-            "result 001-00001-00".to_string(),
-            "result 001-00002-02".to_string(),
-            "result 001-00003-00".to_string(),
-            "result 001-00004-00".to_string(),
+            format!("result {TEST_JOB_UUID}-001-00000-02"),
+            format!("result {TEST_JOB_UUID}-001-00001-00"),
+            format!("result {TEST_JOB_UUID}-001-00002-02"),
+            format!("result {TEST_JOB_UUID}-001-00003-00"),
+            format!("result {TEST_JOB_UUID}-001-00004-00"),
         ],
         "Finished tasks should be the retry tasks for 0 and 2"
     );
@@ -493,11 +497,11 @@ async fn task_panicked() {
     assert_eq!(
         result,
         vec![
-            "result 001-00000-00".to_string(),
-            "result 001-00001-00".to_string(),
-            "result 001-00002-01".to_string(),
-            "result 001-00003-00".to_string(),
-            "result 001-00004-00".to_string(),
+            format!("result {TEST_JOB_UUID}-001-00000-00"),
+            format!("result {TEST_JOB_UUID}-001-00001-00"),
+            format!("result {TEST_JOB_UUID}-001-00002-01"),
+            format!("result {TEST_JOB_UUID}-001-00003-00"),
+            format!("result {TEST_JOB_UUID}-001-00004-00"),
         ],
         "Finished tasks should be the retry task for task 2"
     );
@@ -514,6 +518,7 @@ async fn task_payload_serialize_failure() {
         tasks_per_stage: 5,
         spawner,
         fail_serialize: Some(SubtaskId {
+            job: TEST_JOB_UUID,
             stage: 0,
             task: 2,
             try_num: 0,
@@ -651,11 +656,11 @@ async fn wait_unordered() {
     assert_eq!(
         sorted,
         vec![
-            "result 000-00000-00".to_string(),
-            "result 000-00001-00".to_string(),
-            "result 000-00002-00".to_string(),
-            "result 000-00003-00".to_string(),
-            "result 000-00004-00".to_string(),
+            format!("result {TEST_JOB_UUID}-000-00000-00"),
+            format!("result {TEST_JOB_UUID}-000-00001-00"),
+            format!("result {TEST_JOB_UUID}-000-00002-00"),
+            format!("result {TEST_JOB_UUID}-000-00003-00"),
+            format!("result {TEST_JOB_UUID}-000-00004-00"),
         ],
     );
 
