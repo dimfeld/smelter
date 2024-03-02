@@ -182,6 +182,7 @@ impl FargateSpawner {
         Ok(SpawnedFargateContainer {
             s3_client: self.s3_client.clone(),
             ecs_client: self.ecs_client.clone(),
+            input_path,
             output_path,
             task,
             check_interval: self.check_interval,
@@ -256,6 +257,7 @@ enum TaskStatus {
 pub struct SpawnedFargateContainer {
     s3_client: aws_sdk_s3::Client,
     ecs_client: aws_sdk_ecs::Client,
+    input_path: String,
     output_path: String,
     task: Task,
     check_interval: Duration,
@@ -319,11 +321,30 @@ impl SpawnedFargateContainer {
         }
     }
 
+    async fn remove_input_payload(&self) -> Result<(), Report<TaskError>> {
+        let (bucket, path) = crate::parse_s3_url(&self.input_path)
+            .ok_or(TaskError::TaskGenerationFailed)
+            .attach_printable_lazy(|| {
+                format!("Invalid S3 URL for input payload: {}", self.output_path)
+            })?;
+
+        self.s3_client
+            .delete_object()
+            .bucket(bucket)
+            .key(path)
+            .send()
+            .await
+            .change_context(TaskError::Failed(true))
+            .attach_printable("Removing input payload")?;
+
+        Ok(())
+    }
+
     async fn get_task_output(&self) -> Result<Vec<u8>, Report<TaskError>> {
         let (bucket, path) = crate::parse_s3_url(&self.output_path)
             .ok_or(TaskError::TaskGenerationFailed)
             .attach_printable_lazy(|| {
-                format!("Invalid S3 URL for input payload: {}", self.output_path)
+                format!("Invalid S3 URL for output payload: {}", self.output_path)
             })?;
 
         let get = self
@@ -389,7 +410,10 @@ impl SpawnedTask for SpawnedFargateContainer {
 
     async fn wait(&mut self) -> Result<Vec<u8>, Report<TaskError>> {
         self.wait_for_task().await?;
-        self.get_task_output().await
+        // We don't care about any error on removing the input payload.
+        futures::future::join(self.remove_input_payload(), self.get_task_output())
+            .await
+            .1
     }
 
     async fn kill(&mut self) -> Result<(), Report<TaskError>> {
