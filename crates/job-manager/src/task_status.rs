@@ -1,4 +1,6 @@
-use tokio::sync::oneshot;
+use std::sync::Arc;
+
+use parking_lot::Mutex;
 
 use crate::SubtaskId;
 
@@ -29,12 +31,6 @@ pub struct StatusUpdateItem {
     pub data: StatusUpdateData,
 }
 
-pub enum StatusUpdateOp {
-    Item(StatusUpdateItem),
-    ReadFrom((tokio::sync::oneshot::Sender<Vec<StatusUpdateItem>>, usize)),
-    Take(tokio::sync::oneshot::Sender<Vec<StatusUpdateItem>>),
-}
-
 /// A wrapper around [StatusCollector] that only sends log messages
 #[derive(Clone)]
 pub struct LogSender {
@@ -59,13 +55,13 @@ impl std::fmt::Debug for LogSender {
 
 #[derive(Clone)]
 pub struct StatusSender {
-    tx: flume::Sender<StatusUpdateOp>,
+    tx: flume::Sender<StatusUpdateItem>,
     keep_logs: bool,
 }
 
 impl StatusSender {
     /// Create a new StatusSender and return the channel that will receive messages.
-    pub fn new(keep_logs: bool) -> (StatusSender, flume::Receiver<StatusUpdateOp>) {
+    pub fn new(keep_logs: bool) -> (StatusSender, flume::Receiver<StatusUpdateItem>) {
         let (tx, rx) = flume::unbounded();
         let sender = StatusSender { tx, keep_logs };
         (sender, rx)
@@ -79,11 +75,11 @@ impl StatusSender {
         }
 
         self.tx
-            .send(StatusUpdateOp::Item(StatusUpdateItem {
+            .send(StatusUpdateItem {
                 task_id,
                 timestamp: time::OffsetDateTime::now_utc(),
                 data,
-            }))
+            })
             .ok();
     }
 
@@ -99,43 +95,26 @@ impl StatusSender {
 #[derive(Clone)]
 pub struct StatusCollector {
     pub sender: StatusSender,
+    buffer: Arc<Mutex<Vec<StatusUpdateItem>>>,
 }
 
 impl StatusCollector {
     /// Create a new StatusCollector and start a task to buffer the messages.
     pub fn new(estimated_num_tasks: usize, keep_logs: bool) -> Self {
         let (sender, rx) = StatusSender::new(keep_logs);
+        let buffer = Arc::new(Mutex::new(Vec::with_capacity(estimated_num_tasks * 3 / 2)));
+        let buf = buffer.clone();
 
         tokio::task::spawn(async move {
-            let mut next_vec_size = estimated_num_tasks * 3 / 2;
-            let mut items = Vec::with_capacity(next_vec_size);
-            while let Ok(op) = rx.recv_async().await {
-                match op {
-                    StatusUpdateOp::Item(item) => {
-                        if keep_logs || !matches!(&item.data, StatusUpdateData::Log { .. }) {
-                            items.push(item);
-                        }
-                    }
-                    StatusUpdateOp::ReadFrom((tx, start)) => {
-                        let start = start.min(items.len());
-                        tx.send(items[start..].to_vec()).ok();
-                    }
-                    StatusUpdateOp::Take(tx) => {
-                        if items.len() > next_vec_size {
-                            next_vec_size = 16;
-                        } else {
-                            next_vec_size = std::cmp::max(16, next_vec_size - items.len());
-                        }
-
-                        let items =
-                            std::mem::replace(&mut items, Vec::with_capacity(next_vec_size));
-                        tx.send(items).ok();
-                    }
+            while let Ok(item) = rx.recv_async().await {
+                if keep_logs || !matches!(&item.data, StatusUpdateData::Log { .. }) {
+                    let mut items = buf.lock();
+                    items.push(item);
                 }
             }
         });
 
-        StatusCollector { sender }
+        StatusCollector { sender, buffer }
     }
 
     pub fn add(&self, task_id: SubtaskId, data: impl Into<StatusUpdateData>) {
@@ -148,26 +127,23 @@ impl StatusCollector {
     }
 
     /// Return a copy of the status updates, starting from the beginning.
-    pub async fn read(&self) -> Vec<StatusUpdateItem> {
-        let (tx, rx) = oneshot::channel();
-        self.sender.tx.send(StatusUpdateOp::ReadFrom((tx, 0))).ok();
-        rx.await.unwrap_or_default()
+    pub fn read(&self) -> Vec<StatusUpdateItem> {
+        self.buffer.lock().clone()
     }
 
     /// Return a copy of the status updates, starting from the requested index.
-    pub async fn read_from(&self, start: usize) -> Vec<StatusUpdateItem> {
-        let (tx, rx) = oneshot::channel();
-        self.sender
-            .tx
-            .send(StatusUpdateOp::ReadFrom((tx, start)))
-            .ok();
-        rx.await.unwrap_or_default()
+    pub fn read_from(&self, start: usize) -> Vec<StatusUpdateItem> {
+        let items = self.buffer.lock();
+        let start = start.min(items.len());
+        items[start..].to_vec()
     }
 
     /// Return the status updates and clear the current buffer.
     pub async fn take(&self) -> Vec<StatusUpdateItem> {
-        let (tx, rx) = oneshot::channel();
-        self.sender.tx.send(StatusUpdateOp::Take(tx)).ok();
-        rx.await.unwrap_or_default()
+        let mut items = self.buffer.lock();
+        let next_len = std::cmp::max(std::cmp::min(items.len(), 1024), 16);
+        let items = std::mem::replace(&mut *items, Vec::with_capacity(next_len));
+
+        items
     }
 }

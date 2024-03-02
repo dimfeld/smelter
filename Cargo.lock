@@ -2503,6 +2503,7 @@ dependencies = [
  "flume",
  "futures",
  "once_cell",
+ "parking_lot",
  "serde",
  "serde_json",
  "smelter-worker",

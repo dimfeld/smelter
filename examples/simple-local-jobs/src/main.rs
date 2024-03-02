@@ -11,7 +11,7 @@ use clap::Parser;
 use error_stack::Report;
 use smelter_job_manager::{
     Job, JobManager, LogSender, SchedulerBehavior, SpawnedTask, StatusSender, StatusUpdateData,
-    StatusUpdateOp, SubTask, SubtaskId, TaskError,
+    SubTask, SubtaskId, TaskError,
 };
 use smelter_local_jobs::spawner::LocalSpawner;
 use tokio::task::JoinSet;
@@ -62,7 +62,7 @@ async fn run_manager() {
 
     loop {
         tokio::select! {
-            Ok(StatusUpdateOp::Item(item)) = status_rx.recv_async() => {
+            Ok(item) = status_rx.recv_async() => {
                 let message = match item.data {
                     StatusUpdateData::Log { message, .. } => message,
                     StatusUpdateData::Failed(message) => message,

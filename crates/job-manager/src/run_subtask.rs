@@ -266,10 +266,7 @@ mod test {
 
         tokio::time::sleep(std::time::Duration::from_millis(10)).await;
         assert!(!task.is_finished(), "task waits for semaphores");
-        assert!(
-            status_collector.read().await.is_empty(),
-            "job did not spawn yet"
-        );
+        assert!(status_collector.read().is_empty(), "job did not spawn yet");
 
         tokio::time::sleep(std::time::Duration::from_millis(10)).await;
         drop(job_lock);
@@ -277,10 +274,7 @@ mod test {
             !task.is_finished(),
             "task waits for job semaphore after acquring job semaphore"
         );
-        assert!(
-            status_collector.read().await.is_empty(),
-            "job did not spawn yet"
-        );
+        assert!(status_collector.read().is_empty(), "job did not spawn yet");
 
         drop(global_lock);
 

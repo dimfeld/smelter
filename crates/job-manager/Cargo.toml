@@ -20,6 +20,7 @@ time = { version = "0.3.34", features = ["serde"] }
 tokio = { version = "1.36.0", features = ["full"] }
 tracing = "0.1.40"
 uuid = { version = "1.7.0", features = ["v7", "serde"] }
+parking_lot = { version = "0.12.1", features = ["hardware-lock-elision"] }
 
 [features]
 default = ["inprocess"]
