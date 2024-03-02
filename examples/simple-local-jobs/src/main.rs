@@ -63,17 +63,7 @@ async fn run_manager() {
     loop {
         tokio::select! {
             Ok(item) = status_rx.recv_async() => {
-                let message = match item.data {
-                    StatusUpdateData::Log { message, .. } => message,
-                    StatusUpdateData::Failed(message) => message,
-                    StatusUpdateData::Spawned(data) => format!("Spawned PID {}", data.runtime_id),
-                    StatusUpdateData::Retry(message) => message,
-                    StatusUpdateData::Cancelled => "Cancelled".to_string(),
-                    StatusUpdateData::Success(data) => {
-                        format!("Success: {}", String::from_utf8_lossy(&data.output))
-                    }
-                };
-                println!("{} {}: {}", item.timestamp, item.task_id, message);
+                println!("{item}");
             }
             join = joins.join_next() => {
                 if let Some(job) = join {

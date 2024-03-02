@@ -1,4 +1,4 @@
-use std::sync::Arc;
+use std::{fmt::Display, sync::Arc};
 
 use parking_lot::Mutex;
 
@@ -24,11 +24,49 @@ pub enum StatusUpdateData {
     Success(StatusUpdateSuccessData),
 }
 
+impl Display for StatusUpdateData {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            StatusUpdateData::Spawned(data) => write!(f, "Spawned ID {}", data.runtime_id),
+            StatusUpdateData::Retry(message) => write!(f, "Retry: {}", message),
+            StatusUpdateData::Failed(message) => write!(f, "Failed: {}", message),
+            StatusUpdateData::Log { stdout, message } => {
+                if *stdout {
+                    write!(f, "Stdout: {}", message)
+                } else {
+                    write!(f, "Stderr: {}", message)
+                }
+            }
+            StatusUpdateData::Cancelled => write!(f, "Cancelled"),
+            StatusUpdateData::Success(data) => {
+                write!(f, "Success: {}", String::from_utf8_lossy(&data.output))
+            }
+        }
+    }
+}
+
 #[derive(Debug, Clone)]
 pub struct StatusUpdateItem {
     pub task_id: SubtaskId,
     pub timestamp: time::OffsetDateTime,
     pub data: StatusUpdateData,
+}
+
+impl Display for StatusUpdateItem {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        let time = self.timestamp.time();
+        write!(
+            f,
+            "{date} {hour:02}:{minute:02}:{second:02}.{ms:03} {task_id}: {data}",
+            date = self.timestamp.date(),
+            hour = time.hour(),
+            minute = time.minute(),
+            second = time.second(),
+            ms = time.millisecond(),
+            task_id = self.task_id,
+            data = self.data
+        )
+    }
 }
 
 /// A wrapper around [StatusCollector] that only sends log messages
