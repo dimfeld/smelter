@@ -11,12 +11,15 @@ use serde::Serialize;
 use smelter_job_manager::{SpawnedTask, SubtaskId, TaskError};
 use smelter_worker::get_trace_context;
 
-use crate::{INPUT_LOCATION_VAR, OTEL_CONTEXT_VAR, OUTPUT_LOCATION_VAR, SUBTASK_ID_VAR};
+use crate::{AwsError, INPUT_LOCATION_VAR, OTEL_CONTEXT_VAR, OUTPUT_LOCATION_VAR, SUBTASK_ID_VAR};
 
 #[derive(Debug, Clone, Default)]
 pub struct FargateTaskArgs {
     /// The task definition to run
     pub task_definition: String,
+    /// The name of the primary container in the task. This is needed so that environment
+    /// variables can be injected into the container.
+    pub container_name: String,
     /// The cluster to run on, if not the default
     pub cluster: Option<String>,
     /// Inject environment variables into the container
@@ -84,8 +87,9 @@ impl FargateSpawner {
         };
 
         let rnd: usize = rand::random();
-        let input_path = format!("{}/{}-input-{}.json", self.s3_data_path, task_id, rnd);
-        let output_path = format!("{}/{}-output-{}.json", self.s3_data_path, task_id, rnd);
+        let s3_data_path = self.s3_data_path.trim_end_matches('/');
+        let input_path = format!("{}/{}-input-{}.json", s3_data_path, task_id, rnd);
+        let output_path = format!("{}/{}-output-{}.json", s3_data_path, task_id, rnd);
 
         let task_id_json = serde_json::to_string(&task_id)
             .change_context(TaskError::TaskGenerationFailed)
@@ -162,6 +166,7 @@ impl FargateSpawner {
                 TaskOverride::builder()
                     .container_overrides(
                         ContainerOverride::builder()
+                            .name(args.container_name)
                             .set_cpu(args.cpu)
                             .set_memory_reservation(args.memory)
                             .set_environment(Some(env))
@@ -175,7 +180,9 @@ impl FargateSpawner {
         let task = op
             .send()
             .await
-            .change_context(TaskError::DidNotStart(false))?;
+            .map_err(AwsError::from)
+            .change_context(TaskError::DidNotStart(false))
+            .attach_printable("Failed to start task")?;
         // look at task.failures
         let task = task.tasks.and_then(|v| v.into_iter().next()).unwrap();
 
@@ -204,13 +211,14 @@ impl FargateSpawner {
 
         self.s3_client
             .put_object()
-            .bucket(bucket)
-            .key(path)
+            .bucket(&bucket)
+            .key(&path)
             .body(ByteStream::from(data))
             .send()
             .await
+            .map_err(AwsError::from)
             .change_context(TaskError::TaskGenerationFailed)
-            .attach_printable("Writing input payload")?;
+            .attach_printable_lazy(|| format!("Writing input payload s3://{bucket}/{path}"))?;
         Ok(())
     }
 
@@ -274,6 +282,7 @@ impl SpawnedFargateContainer {
             .tasks(self.task.task_arn().unwrap())
             .send()
             .await
+            .map_err(AwsError::from)
             .change_context(TaskError::Failed(true))?;
 
         let task = task_desc.tasks.unwrap().into_iter().next().unwrap();
@@ -334,8 +343,29 @@ impl SpawnedFargateContainer {
             .key(path)
             .send()
             .await
+            .map_err(AwsError::from)
             .change_context(TaskError::Failed(true))
             .attach_printable("Removing input payload")?;
+
+        Ok(())
+    }
+
+    async fn remove_output_payload(&self) -> Result<(), Report<TaskError>> {
+        let (bucket, path) = crate::parse_s3_url(&self.output_path)
+            .ok_or(TaskError::TaskGenerationFailed)
+            .attach_printable_lazy(|| {
+                format!("Invalid S3 URL for output payload: {}", self.output_path)
+            })?;
+
+        self.s3_client
+            .delete_object()
+            .bucket(bucket)
+            .key(path)
+            .send()
+            .await
+            .map_err(AwsError::from)
+            .change_context(TaskError::Failed(true))
+            .attach_printable("Removing output payload")?;
 
         Ok(())
     }
@@ -350,19 +380,22 @@ impl SpawnedFargateContainer {
         let get = self
             .s3_client
             .get_object()
-            .bucket(bucket)
-            .key(path)
+            .bucket(&bucket)
+            .key(&path)
             .send()
             .await
+            .map_err(AwsError::from)
             .change_context(TaskError::Failed(true))
-            .attach_printable("Fetching output payload")?;
+            .attach_printable_lazy(|| format!("Fetching output payload s3://{bucket}/{path}"))?;
 
         let data = get
             .body
             .collect()
             .await
             .change_context(TaskError::Failed(true))
-            .attach_printable("Reading output payload")?;
+            .attach_printable_lazy(|| {
+                format!("Reading output payload body s3://{bucket}/{path}")
+            })?;
         Ok(data.into_bytes().to_vec())
     }
 
@@ -410,10 +443,11 @@ impl SpawnedTask for SpawnedFargateContainer {
 
     async fn wait(&mut self) -> Result<Vec<u8>, Report<TaskError>> {
         self.wait_for_task().await?;
-        // We don't care about any error on removing the input payload.
-        futures::future::join(self.remove_input_payload(), self.get_task_output())
-            .await
-            .1
+        let output = self.get_task_output().await?;
+        // We don't care about any error on removing the payloads.
+        let _ =
+            futures::future::join(self.remove_input_payload(), self.remove_output_payload()).await;
+        Ok(output)
     }
 
     async fn kill(&mut self) -> Result<(), Report<TaskError>> {
@@ -424,6 +458,7 @@ impl SpawnedTask for SpawnedFargateContainer {
             .reason("aborted by job manager")
             .send()
             .await
+            .map_err(AwsError::from)
             .change_context(TaskError::Failed(true))?;
         Ok(())
     }
