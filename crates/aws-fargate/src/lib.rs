@@ -1,3 +1,5 @@
+use thiserror::Error;
+
 #[cfg(feature = "spawner")]
 pub mod spawner;
 #[cfg(feature = "worker")]
@@ -7,6 +9,16 @@ const INPUT_LOCATION_VAR: &str = "SMELTER_INPUT_LOCATION";
 const OUTPUT_LOCATION_VAR: &str = "SMELTER_OUTPUT_LOCATION";
 const SUBTASK_ID_VAR: &str = "SMELTER_SUBTASK_ID";
 const OTEL_CONTEXT_VAR: &str = "SMELTER_OTEL_CONTEXT";
+
+#[derive(Debug, Error)]
+#[error("{0}")]
+struct AwsError(String);
+
+impl AwsError {
+    fn from<E: std::fmt::Debug>(value: E) -> Self {
+        Self(format!("{value:?}"))
+    }
+}
 
 pub fn parse_s3_url(path: &str) -> Option<(String, String)> {
     let u = url::Url::parse(path).ok()?;

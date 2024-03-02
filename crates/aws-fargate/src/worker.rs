@@ -9,7 +9,7 @@ use smelter_worker::{
 use thiserror::Error;
 use tracing::{event, Level};
 
-use crate::{INPUT_LOCATION_VAR, OTEL_CONTEXT_VAR, OUTPUT_LOCATION_VAR, SUBTASK_ID_VAR};
+use crate::{AwsError, INPUT_LOCATION_VAR, OTEL_CONTEXT_VAR, OUTPUT_LOCATION_VAR, SUBTASK_ID_VAR};
 
 #[derive(Debug, Error)]
 pub enum FargateWorkerError {
@@ -122,6 +122,7 @@ impl FargateWorker {
             .key(path)
             .send()
             .await
+            .map_err(AwsError::from)
             .change_context(FargateWorkerError::ReadInput)
             .attach_printable("Fetching input payload")?
             .body
@@ -166,6 +167,7 @@ impl FargateWorker {
             .body(ByteStream::from(body))
             .send()
             .await
+            .map_err(AwsError::from)
             .change_context(FargateWorkerError::WriteOutput)
             .attach_printable("Writing output payload")?;
 

@@ -12,6 +12,7 @@ aws-sdk-ecs = { version = "1.16.0", optional = true }
 aws-sdk-s3 = "1.17.0"
 error-stack = "0.4.1"
 eyre = "0.6.12"
+futures = "0.3.30"
 rand = "0.8.5"
 serde = "1.0.197"
 serde_json = "1.0.114"
