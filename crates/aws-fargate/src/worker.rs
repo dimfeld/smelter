@@ -181,7 +181,7 @@ pub async fn run_worker_without_input<F, FUT, OUTPUT, ERR>(
 ) -> Result<(), Report<FargateWorkerError>>
 where
     F: FnOnce(WorkerInput<()>) -> FUT,
-    FUT: Future<Output = Result<WorkerResult<OUTPUT>, ERR>>,
+    FUT: Future<Output = Result<OUTPUT, ERR>>,
     ERR: std::error::Error,
     OUTPUT: Debug + Serialize + Send + 'static,
 {
@@ -199,7 +199,7 @@ where
 pub async fn run_worker<INPUT, F, FUT, OUTPUT, ERR>(f: F) -> Result<(), Report<FargateWorkerError>>
 where
     F: FnOnce(WorkerInput<INPUT>) -> FUT,
-    FUT: Future<Output = Result<WorkerResult<OUTPUT>, ERR>>,
+    FUT: Future<Output = Result<OUTPUT, ERR>>,
     ERR: std::error::Error,
     INPUT: Debug + DeserializeOwned + Send + 'static,
     OUTPUT: Debug + Serialize + Send + 'static,
