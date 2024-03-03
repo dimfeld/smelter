@@ -119,6 +119,7 @@ pub(crate) struct StageArgs<SUBTASK: SubTask> {
     pub stage_index: usize,
     pub parent_span: Span,
     pub new_task_rx: Receiver<SUBTASK>,
+    pub cancel_rx: tokio::sync::watch::Receiver<()>,
     pub subtask_result_tx: Sender<Result<TaskDefWithOutput<SUBTASK>, Report<TaskError>>>,
     pub scheduler: SchedulerBehavior,
     pub status_sender: StatusSender,
@@ -141,6 +142,7 @@ pub(crate) async fn run_tasks_stage<SUBTASK: SubTask>(
         job_id: job,
         stage_index,
         new_task_rx,
+        cancel_rx: mut job_cancel_rx,
         subtask_result_tx,
         scheduler,
         status_sender,
@@ -292,6 +294,11 @@ pub(crate) async fn run_tasks_stage<SUBTASK: SubTask>(
                         }
                     }
                 }
+            }
+
+            _ = job_cancel_rx.changed() => {
+                event!(Level::DEBUG, "job cancelled");
+                break;
             }
         }
 

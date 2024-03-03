@@ -4,9 +4,29 @@ pub mod inprocess;
 use error_stack::Report;
 use thiserror::Error;
 
-#[derive(Debug, Error)]
-#[error("Stage {0} failed")]
-pub struct StageError(pub usize);
+#[derive(Debug)]
+pub struct StageError {
+    pub stage: usize,
+    pub cancelled: bool,
+}
+
+impl std::error::Error for StageError {}
+
+impl std::fmt::Display for StageError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        if self.stage == 0 {
+            write!(f, "Job")?;
+        } else {
+            write!(f, "Stage {}", self.stage)?;
+        }
+
+        if self.cancelled {
+            write!(f, " was cancelled")
+        } else {
+            write!(f, " failed")
+        }
+    }
+}
 
 /// A stringified error copied from a worker's output.
 #[derive(Debug, Error)]

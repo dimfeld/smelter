@@ -25,9 +25,11 @@ pub struct Job {
     global_semaphore: Option<Arc<Semaphore>>,
     status_sender: StatusSender,
     stage_task_tx: Sender<(usize, StageTaskHandle)>,
-    done: tokio::sync::watch::Sender<()>,
+    job_cancel_tx: tokio::sync::watch::Sender<()>,
+    tasks_cancel_rx: tokio::sync::watch::Receiver<()>,
+    done_adding: tokio::sync::watch::Sender<()>,
     num_stages: usize,
-    stage_monitor_task: Option<JoinHandle<Result<(), Report<StageError>>>>,
+    stage_monitor_task: Option<JoinHandle<Result<bool, Report<StageError>>>>,
 }
 
 impl Job {
@@ -36,12 +38,20 @@ impl Job {
         let max_concurrent_tasks = scheduler.max_concurrent_tasks.unwrap_or(i32::MAX as usize);
         let job_semaphore = Arc::new(Semaphore::new(max_concurrent_tasks));
 
-        let (done_tx, done_rx) = tokio::sync::watch::channel(());
+        // When we're done adding tasks
+        let (done_adding_tx, done_adding_rx) = tokio::sync::watch::channel(());
+        // Signal to the subtasks to cancel them
+        let (tasks_cancel_tx, tasks_cancel_rx) = tokio::sync::watch::channel(());
+        // Signal to the task monitor to trigger a cancel
+        let (job_cancel_tx, job_cancel_rx) = tokio::sync::watch::channel(());
 
         let (stage_task_tx, stage_task_rx) = flume::unbounded();
         let stage_monitor_task = tokio::task::spawn(Self::monitor_job_stages(
             stage_task_rx,
-            done_rx,
+            manager.cancel_rx.clone(),
+            job_cancel_rx,
+            done_adding_rx,
+            tasks_cancel_tx,
             job_semaphore.clone(),
         ));
 
@@ -52,7 +62,9 @@ impl Job {
             global_semaphore: manager.global_semaphore.clone(),
             status_sender: manager.status_sender.clone(),
             stage_task_tx,
-            done: done_tx,
+            job_cancel_tx,
+            tasks_cancel_rx,
+            done_adding: done_adding_tx,
             stage_monitor_task: Some(stage_monitor_task),
             num_stages: 0,
         }
@@ -62,18 +74,44 @@ impl Job {
         self.id
     }
 
-    /// Wait for the job to finish and return any errors.
+    /// Wait for the job to finish and return any errors. This must be used to properly detect
+    /// a job failure.
     #[instrument(skip(self))]
     pub async fn wait(&mut self) -> Result<(), Report<StageError>> {
-        self.done.send(()).ok();
+        self.done_adding.send(()).ok();
         let Some(stage_monitor_task) = self.stage_monitor_task.take() else {
             return Ok(());
         };
 
         match stage_monitor_task.await {
-            Ok(e) => e,
-            Err(e) => Err(e).change_context(StageError(0)),
+            Ok(Ok(cancelled)) => {
+                if cancelled {
+                    Err(Report::new(StageError {
+                        stage: 0,
+                        cancelled: true,
+                    }))
+                } else {
+                    Ok(())
+                }
+            }
+            Ok(Err(e)) => Err(e).change_context(StageError {
+                stage: 0,
+                cancelled: false,
+            }),
+            Err(e) => Err(e).change_context(StageError {
+                stage: 0,
+                cancelled: false,
+            }),
         }
+    }
+
+    /// Cancel any pending or running tasks for the job
+    pub fn cancel(&self) {
+        if !self.job_semaphore.is_closed() {
+            self.job_semaphore.close();
+        }
+        self.done_adding.send(()).ok();
+        self.job_cancel_tx.send(()).ok();
     }
 
     /// Create a new stage in the job, which is a set of linked subtasks.
@@ -91,6 +129,7 @@ impl Job {
             stage_index,
             parent_span: Span::current(),
             new_task_rx,
+            cancel_rx: self.tasks_cancel_rx.clone(),
             subtask_result_tx,
             scheduler: self.scheduler.clone(),
             status_sender: self.status_sender.clone(),
@@ -133,11 +172,15 @@ impl Job {
     #[instrument(level = "debug")]
     async fn monitor_job_stages(
         stage_task_rx: Receiver<(usize, StageTaskHandle)>,
-        mut close: tokio::sync::watch::Receiver<()>,
+        mut manager_cancelled: tokio::sync::watch::Receiver<()>,
+        mut job_cancelled: tokio::sync::watch::Receiver<()>,
+        mut done_adding: tokio::sync::watch::Receiver<()>,
+        tasks_cancel_tx: tokio::sync::watch::Sender<()>,
         job_semaphore: Arc<Semaphore>,
-    ) -> Result<(), Report<StageError>> {
+    ) -> Result<bool, Report<StageError>> {
         let mut outstanding = FuturesUnordered::new();
         let mut done = false;
+        let mut cancelled = false;
 
         while (!job_semaphore.is_closed() && !done) || !outstanding.is_empty() {
             tokio::select! {
@@ -145,18 +188,16 @@ impl Job {
                     let (index, result): (usize, Result<Result<(), Report<TaskError>>, JoinError>) = result;
 
                     match result {
-                        Ok(r) => {
-                            let result = r.change_context(StageError(index));
-                            if result.is_err() {
-                                job_semaphore.close();
-                                return result;
-                            }
-
+                        Ok(Ok(_)) => {}
+                        Ok(Err(e)) => {
+                            let result = Err(e).change_context(StageError{ stage: index, cancelled: false });
+                            job_semaphore.close();
+                            return result;
                         }
                         Err(e) => {
                             // Task panicked
                             job_semaphore.close();
-                            return Err(e).change_context(StageError(index));
+                            return Err(e).change_context(StageError{ stage: index, cancelled: false });
                         }
 
                     }
@@ -177,18 +218,30 @@ impl Job {
                     }
                 }
 
-                _ = close.changed() => {
+                _ = manager_cancelled.changed() => {
+                    done = true;
+                    cancelled = true;
+                    tasks_cancel_tx.send(()).ok();
+                }
+
+                _ = job_cancelled.changed() => {
+                    done = true;
+                    cancelled = true;
+                    tasks_cancel_tx.send(()).ok();
+                }
+
+                _ = done_adding.changed() => {
                     done = true;
                 }
             }
         }
 
-        Ok(())
+        Ok(cancelled)
     }
 }
 
 impl Drop for Job {
     fn drop(&mut self) {
-        self.job_semaphore.close();
+        self.cancel();
     }
 }

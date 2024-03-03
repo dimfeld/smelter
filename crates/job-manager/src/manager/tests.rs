@@ -13,7 +13,7 @@ use crate::{
     scheduler::{SchedulerBehavior, SlowTaskBehavior},
     spawn::{inprocess::InProcessSpawner, SpawnedTask, TaskError},
     task_status::{StatusCollector, StatusUpdateData},
-    LogSender, SubTask, SubtaskId, TaskDefWithOutput,
+    LogSender, StatusSender, SubTask, SubtaskId, TaskDefWithOutput,
 };
 
 pub(crate) const TEST_JOB_UUID: Uuid = Uuid::from_u128(0x01234567890abcdef);
@@ -668,4 +668,56 @@ async fn wait_unordered() {
         result, sorted,
         "final task result should not correspond to order tasks were run"
     );
+}
+
+#[tokio::test]
+async fn cancel_job() {
+    let spawner = Arc::new(InProcessSpawner::new(|info| async move {
+        let duration = 1000;
+        tokio::time::sleep(Duration::from_millis(duration as u64)).await;
+        Ok(format!("result {}", info.task_id))
+    }));
+
+    let (status_tx, status_rx) = StatusSender::new(true);
+    let manager = JobManager::new(
+        SchedulerBehavior {
+            max_concurrent_tasks: None,
+            max_retries: 2,
+            slow_task_behavior: SlowTaskBehavior::Wait,
+        },
+        status_tx,
+        None,
+    );
+
+    let mut job = manager.new_job();
+
+    let (stage_tx, stage_rx) = job.add_stage().await;
+    let num_tasks = 10;
+    for _ in 0..num_tasks {
+        stage_tx
+            .push(TestSubTaskDef {
+                spawn_name: "test".to_string(),
+                spawner: spawner.clone(),
+                fail_serialize: false,
+            })
+            .await;
+    }
+
+    // Wait to get at least one status update, indicating that the above has started.
+    let st = status_rx.recv_async().await.ok();
+    println!("status: {:?}", st);
+    tokio::time::sleep(Duration::from_millis(50)).await;
+
+    manager.cancel();
+
+    let task_results = stage_rx.collect().await.expect("done?");
+    assert!(
+        task_results.len() < num_tasks,
+        "All tasks should not have finished"
+    );
+    let err = job
+        .wait()
+        .await
+        .expect_err("Job wait should return an error");
+    assert!(err.current_context().cancelled);
 }
