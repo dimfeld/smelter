@@ -19,14 +19,18 @@ pub struct LocalWorkerInfo {
     pub output: PathBuf,
 }
 
+/// An error returned by the [LocalWorkerInfo]
 #[derive(thiserror::Error, Debug)]
 pub enum LocalWorkerError {
+    /// Failed to read an expected environment variable
     #[error("Error reading environment variables")]
     Environment,
+    /// Failed to read the input payload
     #[error("Error reading input payload")]
-    ReadPayload,
+    ReadInput,
+    /// Failed to write the output payload
     #[error("Error writing output payload")]
-    WritePayload,
+    WriteOutput,
 }
 
 impl LocalWorkerInfo {
@@ -53,15 +57,15 @@ impl LocalWorkerInfo {
         let input = self.input.clone();
         let worker_input = tokio::task::spawn_blocking(move || {
             let file = std::fs::File::open(&input)
-                .change_context(LocalWorkerError::ReadPayload)
+                .change_context(LocalWorkerError::ReadInput)
                 .attach_printable_lazy(|| input.display().to_string())?;
             let file = std::io::BufReader::new(file);
 
             serde_json::from_reader::<_, WorkerInput<PAYLOAD>>(file)
-                .change_context(LocalWorkerError::ReadPayload)
+                .change_context(LocalWorkerError::ReadInput)
         })
         .await
-        .change_context(LocalWorkerError::ReadPayload)??;
+        .change_context(LocalWorkerError::ReadInput)??;
 
         worker_input.propagate_tracing_context();
         Ok(worker_input)
@@ -80,12 +84,12 @@ impl LocalWorkerInfo {
         let output = self.output.clone();
         tokio::task::spawn_blocking(move || {
             let file = std::fs::File::create(&output)
-                .change_context(LocalWorkerError::WritePayload)
+                .change_context(LocalWorkerError::WriteOutput)
                 .attach_printable_lazy(|| output.display().to_string())?;
             let mut file = std::io::BufWriter::new(file);
-            serde_json::to_writer(&mut file, &result).change_context(LocalWorkerError::WritePayload)
+            serde_json::to_writer(&mut file, &result).change_context(LocalWorkerError::WriteOutput)
         })
         .await
-        .change_context(LocalWorkerError::WritePayload)?
+        .change_context(LocalWorkerError::WriteOutput)?
     }
 }

@@ -1,3 +1,7 @@
+#![warn(missing_docs)]
+
+//! Spawn Smelter jobs as AWS Fargate tasks.
+
 use thiserror::Error;
 
 #[cfg(feature = "spawner")]
@@ -20,7 +24,7 @@ impl AwsError {
     }
 }
 
-pub fn parse_s3_url(path: &str) -> Option<(String, String)> {
+fn parse_s3_url(path: &str) -> Option<(String, String)> {
     let u = url::Url::parse(path).ok()?;
     if u.scheme() != "s3" {
         return None;

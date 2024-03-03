@@ -1,3 +1,4 @@
+//! Worker-side code to run from inside a Fargate container
 use std::{collections::HashMap, fmt::Debug, future::Future};
 
 use aws_sdk_s3::primitives::ByteStream;
@@ -11,18 +12,22 @@ use tracing::{event, Level};
 
 use crate::{AwsError, INPUT_LOCATION_VAR, OTEL_CONTEXT_VAR, OUTPUT_LOCATION_VAR, SUBTASK_ID_VAR};
 
+/// An error that the [FargateWorker] may encounter
 #[derive(Debug, Error)]
 pub enum FargateWorkerError {
+    /// Failed when initializing the worker environment
     #[error("Error initializing worker")]
     Initializing,
+    /// Failed to read the input payload
     #[error("Failed to read input payload")]
     ReadInput,
+    /// Failed to write the output payload
     #[error("Failed to write output payload")]
     WriteOutput,
 }
 
 impl FargateWorkerError {
-    pub fn retryable(&self) -> bool {
+    fn retryable(&self) -> bool {
         match self {
             FargateWorkerError::Initializing => false,
             FargateWorkerError::ReadInput => true,
@@ -31,12 +36,18 @@ impl FargateWorkerError {
     }
 }
 
+/// The [FargateWorker] manages error handling, payload I/O, and other Smelter-specfic framework
+/// tasks.
 pub struct FargateWorker {
+    /// Where to read the input payload from
     pub input_path: Option<(String, String)>,
+    /// Where to write the output payload
     pub output_path: (String, String),
 
+    /// The Smelter task ID for this task
     pub task_id: SubtaskId,
     #[cfg(feature = "opentelemetry")]
+    /// OpenTelemetry trace context
     pub trace_context: HashMap<String, String>,
 
     s3_client: aws_sdk_s3::Client,

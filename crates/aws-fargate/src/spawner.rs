@@ -1,3 +1,5 @@
+//! Spawn tasks using the AWS Fargate API
+
 use std::{any::Any, time::Duration};
 
 use async_trait::async_trait;
@@ -13,6 +15,7 @@ use smelter_worker::get_trace_context;
 
 use crate::{AwsError, INPUT_LOCATION_VAR, OTEL_CONTEXT_VAR, OUTPUT_LOCATION_VAR, SUBTASK_ID_VAR};
 
+/// Arguments to tell a [FargateSpawner] how to run a container on Fargate
 #[derive(Debug, Clone, Default)]
 pub struct FargateTaskArgs {
     /// The task definition to run
@@ -46,6 +49,7 @@ pub struct FargateTaskArgs {
     pub run_timeout: Option<Duration>,
 }
 
+/// Spawn tasks using the AWS Fargate API
 #[derive(Clone)]
 pub struct FargateSpawner {
     /// A base path in S3 to store input and output data.
@@ -225,20 +229,23 @@ impl FargateSpawner {
         Ok(())
     }
 
+    /// Create a new [FargateSpawnerForTask] from this spawner and the provided [FargateTaskArgs]
     pub fn for_task(&self, args: FargateTaskArgs) -> FargateSpawnerForTask {
         FargateSpawnerForTask::new(self.clone(), args)
     }
 }
 
-pub struct FargateSpawnerForTaskInner {
+struct FargateSpawnerForTaskInner {
     spawner: FargateSpawner,
     args: FargateTaskArgs,
 }
 
+/// A [FargateSpawner] linked to a particular [FargateTaskArgs], for convenience.
 #[derive(Clone)]
 pub struct FargateSpawnerForTask(std::sync::Arc<FargateSpawnerForTaskInner>);
 
 impl FargateSpawnerForTask {
+    /// Create a new FargateSpawnerForTask
     pub fn new(spawner: FargateSpawner, args: FargateTaskArgs) -> Self {
         Self(std::sync::Arc::new(FargateSpawnerForTaskInner {
             spawner,
@@ -246,6 +253,7 @@ impl FargateSpawnerForTask {
         }))
     }
 
+    /// Spawn the given task
     pub async fn spawn<T: Serialize + 'static>(
         &self,
         task_id: SubtaskId,
@@ -265,6 +273,7 @@ enum TaskStatus {
     Succeeded,
 }
 
+/// Tracking for a spawned Fargate task
 pub struct SpawnedFargateContainer {
     task_id: SubtaskId,
     s3_client: aws_sdk_s3::Client,
