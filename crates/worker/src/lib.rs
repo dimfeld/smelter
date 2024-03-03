@@ -3,6 +3,7 @@ use std::{collections::HashMap, fmt::Debug, io::Read};
 #[cfg(feature = "opentelemetry")]
 use opentelemetry::sdk::propagation::TraceContextPropagator;
 use serde::{de::DeserializeOwned, Deserialize, Serialize};
+use thiserror::Error;
 use uuid::Uuid;
 
 /// The ID for a subtask, which uniquely identifies it within a [Job].
@@ -165,6 +166,30 @@ impl<T: Debug + DeserializeOwned> WorkerResult<T> {
             Ok(WorkerResult::Ok(r)) => Ok(r),
             Ok(WorkerResult::Err(e)) => Err(e),
             Err(e) => Err(WorkerError::from_error(false, e)),
+        }
+    }
+}
+
+/// An error that the worker wrapper framework may encounter
+#[derive(Debug, Error)]
+pub enum WrapperError {
+    /// Failed when initializing the worker environment
+    #[error("Error initializing worker")]
+    Initializing,
+    /// Failed to read the input payload
+    #[error("Failed to read input payload")]
+    ReadInput,
+    /// Failed to write the output payload
+    #[error("Failed to write output payload")]
+    WriteOutput,
+}
+
+impl WrapperError {
+    pub fn retryable(&self) -> bool {
+        match self {
+            WrapperError::Initializing => false,
+            WrapperError::ReadInput => true,
+            WrapperError::WriteOutput => true,
         }
     }
 }

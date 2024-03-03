@@ -2545,6 +2545,7 @@ dependencies = [
  "opentelemetry",
  "serde",
  "serde_json",
+ "thiserror",
  "tracing",
  "tracing-opentelemetry",
  "uuid",

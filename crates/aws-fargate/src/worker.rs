@@ -5,36 +5,12 @@ use aws_sdk_s3::primitives::ByteStream;
 use error_stack::{Report, ResultExt};
 use serde::{de::DeserializeOwned, Serialize};
 use smelter_worker::{
-    propagate_tracing_context, SubtaskId, WorkerError, WorkerInput, WorkerResult,
+    propagate_tracing_context, SubtaskId, WorkerError, WorkerInput, WorkerResult, WrapperError,
 };
 use thiserror::Error;
 use tracing::{event, Level};
 
 use crate::{AwsError, INPUT_LOCATION_VAR, OTEL_CONTEXT_VAR, OUTPUT_LOCATION_VAR, SUBTASK_ID_VAR};
-
-/// An error that the [FargateWorker] may encounter
-#[derive(Debug, Error)]
-pub enum FargateWorkerError {
-    /// Failed when initializing the worker environment
-    #[error("Error initializing worker")]
-    Initializing,
-    /// Failed to read the input payload
-    #[error("Failed to read input payload")]
-    ReadInput,
-    /// Failed to write the output payload
-    #[error("Failed to write output payload")]
-    WriteOutput,
-}
-
-impl FargateWorkerError {
-    fn retryable(&self) -> bool {
-        match self {
-            FargateWorkerError::Initializing => false,
-            FargateWorkerError::ReadInput => true,
-            FargateWorkerError::WriteOutput => true,
-        }
-    }
-}
 
 /// The [FargateWorker] manages error handling, payload I/O, and other Smelter-specfic framework
 /// tasks.
@@ -65,21 +41,21 @@ impl Debug for FargateWorker {
 
 impl FargateWorker {
     /// Read the container environment to initialize tracing context.
-    pub fn from_env(s3_client: aws_sdk_s3::Client) -> Result<Self, Report<FargateWorkerError>> {
+    pub fn from_env(s3_client: aws_sdk_s3::Client) -> Result<Self, Report<WrapperError>> {
         let input_path = std::env::var(INPUT_LOCATION_VAR)
             .ok()
             .and_then(|input| crate::parse_s3_url(&input));
 
         let output = std::env::var(OUTPUT_LOCATION_VAR)
-            .change_context(FargateWorkerError::Initializing)
+            .change_context(WrapperError::Initializing)
             .attach_printable("Missing OUTPUT_FILE environment variable")?;
 
         let task_id = std::env::var(SUBTASK_ID_VAR)
-            .change_context(FargateWorkerError::Initializing)
+            .change_context(WrapperError::Initializing)
             .attach_printable("Missing SMELTER_TASK_ID environment variable")?;
 
         let task_id: SubtaskId = serde_json::from_str(&task_id)
-            .change_context(FargateWorkerError::Initializing)
+            .change_context(WrapperError::Initializing)
             .attach_printable("Invalid Subtask ID in SMELTER_TASK_ID environment variable")?;
 
         #[cfg(feature = "opentelemetry")]
@@ -91,7 +67,7 @@ impl FargateWorker {
         Ok(FargateWorker {
             input_path,
             output_path: crate::parse_s3_url(&output)
-                .ok_or(FargateWorkerError::Initializing)
+                .ok_or(WrapperError::Initializing)
                 .attach_printable("Failed to parse OUTPUT_FILE as S3 URL")?,
             task_id,
             #[cfg(feature = "opentelemetry")]
@@ -116,14 +92,14 @@ impl FargateWorker {
     /// Read the input payload and initialize tracing context.
     pub async fn read_input<PAYLOAD: DeserializeOwned + Send + 'static>(
         &self,
-    ) -> Result<WorkerInput<PAYLOAD>, Report<FargateWorkerError>> {
+    ) -> Result<WorkerInput<PAYLOAD>, Report<WrapperError>> {
         #[cfg(feature = "opentelemetry")]
         propagate_tracing_context(&self.trace_context);
 
         let (bucket, path) = self
             .input_path
             .as_ref()
-            .ok_or(FargateWorkerError::ReadInput)
+            .ok_or(WrapperError::ReadInput)
             .attach_printable("Missing INPUT_FILE environment variable")?;
 
         let body = self
@@ -134,17 +110,17 @@ impl FargateWorker {
             .send()
             .await
             .map_err(AwsError::from)
-            .change_context(FargateWorkerError::ReadInput)
+            .change_context(WrapperError::ReadInput)
             .attach_printable("Fetching input payload")?
             .body
             .collect()
             .await
-            .change_context(FargateWorkerError::ReadInput)
+            .change_context(WrapperError::ReadInput)
             .attach_printable("Reading input payload")?
             .into_bytes();
 
         let payload = serde_json::from_slice(body.as_ref())
-            .change_context(FargateWorkerError::ReadInput)
+            .change_context(WrapperError::ReadInput)
             .attach_printable("Deserializing input payload")?;
 
         let input = WorkerInput {
@@ -161,14 +137,14 @@ impl FargateWorker {
     pub async fn write_output<DATA: Debug>(
         &self,
         result: impl Into<WorkerResult<DATA>>,
-    ) -> Result<(), Report<FargateWorkerError>>
+    ) -> Result<(), Report<WrapperError>>
     where
         DATA: serde::Serialize + Send + 'static,
     {
         let (bucket, path) = &self.output_path;
 
         let body = serde_json::to_vec(&result.into())
-            .change_context(FargateWorkerError::WriteOutput)
+            .change_context(WrapperError::WriteOutput)
             .attach_printable("Serializing output payload")?;
 
         self.s3_client
@@ -179,7 +155,7 @@ impl FargateWorker {
             .send()
             .await
             .map_err(AwsError::from)
-            .change_context(FargateWorkerError::WriteOutput)
+            .change_context(WrapperError::WriteOutput)
             .attach_printable("Writing output payload")?;
 
         Ok(())
@@ -187,9 +163,7 @@ impl FargateWorker {
 }
 
 /// Run a worker that doesn't expect any input payload, and record the output for the job spawner to retrieve.
-pub async fn run_worker_without_input<F, FUT, OUTPUT, ERR>(
-    f: F,
-) -> Result<(), Report<FargateWorkerError>>
+pub async fn run_worker_without_input<F, FUT, OUTPUT, ERR>(f: F) -> Result<(), Report<WrapperError>>
 where
     F: FnOnce(WorkerInput<()>) -> FUT,
     FUT: Future<Output = Result<OUTPUT, ERR>>,
@@ -207,7 +181,7 @@ where
 }
 
 /// Run the worker and record the output for the job spawner to retrieve.
-pub async fn run_worker<INPUT, F, FUT, OUTPUT, ERR>(f: F) -> Result<(), Report<FargateWorkerError>>
+pub async fn run_worker<INPUT, F, FUT, OUTPUT, ERR>(f: F) -> Result<(), Report<WrapperError>>
 where
     F: FnOnce(WorkerInput<INPUT>) -> FUT,
     FUT: Future<Output = Result<OUTPUT, ERR>>,
