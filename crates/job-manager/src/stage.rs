@@ -228,7 +228,7 @@ pub(crate) async fn run_tasks_stage<SUBTASK: SubTask>(
                 match new_task {
                     Ok(new_task) => {
                         event!(Level::DEBUG, %stage_index, ?new_task, "received task");
-                        unfinished.insert (total_num_tasks, TaskTrackingInfo{
+                        unfinished.insert(total_num_tasks, TaskTrackingInfo{
                             try_num: 0,
                             input: new_task.clone(),
                         });
@@ -325,6 +325,20 @@ pub(crate) async fn run_tasks_stage<SUBTASK: SubTask>(
             }
 
             _ = job_cancel_rx.changed() => {
+                if let Some((task_index, info)) = unfinished.iter().next() {
+                    // Send a cancellation error on one of the unfinished tasks, if there is one,
+                    // so that anyone handling the stage results will see the error there.
+                    let id = SubtaskId {
+                        job,
+                        stage: stage_index as u16,
+                        task: *task_index as u32,
+                        try_num: info.try_num as u16,
+                    };
+
+                    subtask_result_tx.send_async(
+                        Err(Report::new(TaskError::cancelled(id)))
+                    ).await.ok();
+                }
                 event!(Level::DEBUG, "job cancelled");
                 break;
             }
@@ -333,10 +347,10 @@ pub(crate) async fn run_tasks_stage<SUBTASK: SubTask>(
         if global_semaphore
             .as_ref()
             .map(|s| s.is_closed())
-            .unwrap_or_else(|| job_semaphore.is_closed())
+            .unwrap_or_default()
         {
-            // This job or the system is shutting down.
-            event!(Level::DEBUG, "semaphores closed");
+            // The system is shutting down.
+            event!(Level::DEBUG, "global semaphore closed");
             break;
         }
     }

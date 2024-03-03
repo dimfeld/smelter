@@ -123,7 +123,7 @@ impl TaskErrorKind {
             Self::DidNotStart(retryable) => *retryable,
             Self::TimedOut => true,
             Self::Lost => true,
-            Self::Cancelled => true,
+            Self::Cancelled => false,
             Self::Failed(retryable) => *retryable,
             Self::TaskGenerationFailed => false,
             Self::TailRetry => false,
