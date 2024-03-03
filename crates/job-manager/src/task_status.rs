@@ -2,7 +2,7 @@ use std::{fmt::Display, sync::Arc};
 
 use parking_lot::Mutex;
 
-use crate::SubtaskId;
+use crate::{SubtaskId, TaskErrorKind};
 
 #[derive(Debug, Clone)]
 pub struct StatusUpdateSpawnedData {
@@ -17,8 +17,8 @@ pub struct StatusUpdateSuccessData {
 #[derive(Debug, Clone)]
 pub enum StatusUpdateData {
     Spawned(StatusUpdateSpawnedData),
-    Retry(String),
-    Failed(String),
+    Retry(TaskErrorKind, String),
+    Failed(TaskErrorKind, String),
     Log { stdout: bool, message: String },
     Cancelled,
     Success(StatusUpdateSuccessData),
@@ -37,8 +37,8 @@ impl Display for StatusUpdateData {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
             StatusUpdateData::Spawned(data) => write!(f, "Spawned ID {}", data.runtime_id),
-            StatusUpdateData::Retry(message) => write!(f, "Retry: {}", message),
-            StatusUpdateData::Failed(message) => write!(f, "Failed: {}", message),
+            StatusUpdateData::Retry(kind, _) => write!(f, "Retry: {}", kind),
+            StatusUpdateData::Failed(kind, _) => write!(f, "Failed: {}", kind),
             StatusUpdateData::Log { stdout, message } => {
                 if *stdout {
                     write!(f, "Stdout: {}", message)
@@ -55,12 +55,20 @@ impl Display for StatusUpdateData {
 }
 
 #[derive(Debug, Clone, Default)]
+pub enum Verbosity {
+    Short,
+    #[default]
+    Standard,
+    Full,
+}
+
+#[derive(Debug, Clone, Default)]
 pub struct StatusUpdateCustomFormatOptions {
-    pub spawned_short: bool,
-    pub retry_short: bool,
-    pub failed_short: bool,
-    pub log_short: bool,
-    pub success_short: bool,
+    pub spawned: Verbosity,
+    pub retry: Verbosity,
+    pub failed: Verbosity,
+    pub log: Verbosity,
+    pub success: Verbosity,
 }
 
 pub struct StatusUpdateDataDisplayCustom<'a> {
@@ -71,44 +79,35 @@ pub struct StatusUpdateDataDisplayCustom<'a> {
 impl Display for StatusUpdateDataDisplayCustom<'_> {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self.data {
-            StatusUpdateData::Spawned(data) => {
-                if self.format.spawned_short {
-                    write!(f, "Spawned {}", data.runtime_id)
-                } else {
-                    write!(f, "Spawned ID {}", data.runtime_id)
-                }
-            }
-            StatusUpdateData::Retry(message) => {
-                if self.format.retry_short {
-                    write!(f, "Retry")
-                } else {
-                    write!(f, "Retry: {}", message)
-                }
-            }
-            StatusUpdateData::Failed(message) => {
-                if self.format.failed_short {
-                    write!(f, "Failed")
-                } else {
-                    write!(f, "Failed: {}", message)
-                }
-            }
+            StatusUpdateData::Spawned(data) => match self.format.spawned {
+                Verbosity::Short => write!(f, "Spawned"),
+                Verbosity::Standard => write!(f, "Spawned ID {}", data.runtime_id),
+                Verbosity::Full => write!(f, "Spawned with ID {}", data.runtime_id),
+            },
+            StatusUpdateData::Retry(kind, message) => match self.format.retry {
+                Verbosity::Short => write!(f, "Retry"),
+                Verbosity::Standard => write!(f, "Retry: {}", kind),
+                Verbosity::Full => write!(f, "Retry: {}", message),
+            },
+            StatusUpdateData::Failed(kind, message) => match self.format.failed {
+                Verbosity::Short => write!(f, "Retry"),
+                Verbosity::Standard => write!(f, "Retry: {}", kind),
+                Verbosity::Full => write!(f, "Retry: {}", message),
+            },
             StatusUpdateData::Log { message, stdout } => {
-                if self.format.log_short {
-                    write!(f, "Log: {}", message)
-                } else if *stdout {
-                    write!(f, "Stdout: {}", message)
-                } else {
-                    write!(f, "Stderr: {}", message)
+                let dest = if *stdout { "Stdout" } else { "Stderr" };
+                match self.format.log {
+                    Verbosity::Short => write!(f, "Log"),
+                    Verbosity::Standard => write!(f, "{dest}: {}", message),
+                    Verbosity::Full => write!(f, "Log {dest}: {}", message),
                 }
             }
             StatusUpdateData::Cancelled => write!(f, "Cancelled"),
-            StatusUpdateData::Success(data) => {
-                if self.format.success_short {
-                    write!(f, "Success")
-                } else {
-                    write!(f, "Success: {}", String::from_utf8_lossy(&data.output))
-                }
-            }
+            StatusUpdateData::Success(data) => match self.format.success {
+                Verbosity::Short => write!(f, "Success"),
+                Verbosity::Standard => write!(f, "Success"),
+                Verbosity::Full => write!(f, "Success: {}", String::from_utf8_lossy(&data.output)),
+            },
         }
     }
 }

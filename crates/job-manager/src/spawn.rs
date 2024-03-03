@@ -2,6 +2,7 @@
 pub mod inprocess;
 
 use error_stack::Report;
+use smelter_worker::SubtaskId;
 use thiserror::Error;
 
 #[derive(Debug)]
@@ -33,26 +34,78 @@ impl std::fmt::Display for StageError {
 #[error("{0}")]
 pub struct SerializedWorkerFailure(pub String);
 
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct TaskError {
+    pub task_id: SubtaskId,
+    pub kind: TaskErrorKind,
+}
+
+impl std::error::Error for TaskError {}
+
+impl std::fmt::Display for TaskError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "Task {}: {}", self.task_id, self.kind)
+    }
+}
+
+impl TaskError {
+    pub fn new(task_id: SubtaskId, kind: TaskErrorKind) -> Self {
+        Self { task_id, kind }
+    }
+
+    pub fn did_not_start(task_id: SubtaskId, retryable: bool) -> Self {
+        Self::new(task_id, TaskErrorKind::DidNotStart(retryable))
+    }
+
+    pub fn timed_out(task_id: SubtaskId) -> Self {
+        Self::new(task_id, TaskErrorKind::TimedOut)
+    }
+
+    pub fn lost(task_id: SubtaskId) -> Self {
+        Self::new(task_id, TaskErrorKind::Lost)
+    }
+
+    pub fn cancelled(task_id: SubtaskId) -> Self {
+        Self::new(task_id, TaskErrorKind::Cancelled)
+    }
+
+    pub fn failed(task_id: SubtaskId, retryable: bool) -> Self {
+        Self::new(task_id, TaskErrorKind::Failed(retryable))
+    }
+
+    pub fn task_generation_failed(task_id: SubtaskId) -> Self {
+        Self::new(task_id, TaskErrorKind::TaskGenerationFailed)
+    }
+
+    pub fn tail_retry(task_id: SubtaskId) -> Self {
+        Self::new(task_id, TaskErrorKind::TailRetry)
+    }
+
+    pub fn retryable(&self) -> bool {
+        self.kind.retryable()
+    }
+}
+
 /// An error indicating that a task failed in some way.
 #[derive(Clone, Error, Debug, PartialEq, Eq)]
-pub enum TaskError {
+pub enum TaskErrorKind {
     /// The spawner failed to start the task.
     #[error("Failed to start")]
     DidNotStart(bool),
     /// The task exceeded its timeout.
-    #[error("Task timed out")]
+    #[error("Timed out")]
     TimedOut,
     /// The task disappeared in such a way that the job manager could not figure out what happened
     /// to it. This might happen, for example, if a serverless job is started but at some point
     /// requests for its status return a "not found" error.
-    #[error("Task was lost by runtime")]
+    #[error("Lost by runtime")]
     Lost,
     /// The task was cancelled because the job is finishing early. This usually means that some
     /// other task in the job failed.
-    #[error("Task was cancelled")]
+    #[error("Cancelled")]
     Cancelled,
     /// The task failed.
-    #[error("Task encountered an error")]
+    #[error("Encountered an error")]
     Failed(bool),
     /// The setup for the task failed.
     #[error("Failed to generate a subtask")]
@@ -64,7 +117,7 @@ pub enum TaskError {
     TailRetry,
 }
 
-impl TaskError {
+impl TaskErrorKind {
     pub fn retryable(&self) -> bool {
         match self {
             Self::DidNotStart(retryable) => *retryable,

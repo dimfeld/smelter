@@ -89,7 +89,7 @@ async fn run_subtask_internal<SUBTASK: SubTask>(
             let res = res.attach_printable_lazy(|| format!("Job {task_id} Runtime ID {runtime_id}"))?;
 
             let output = WorkerResult::parse(&res)
-                .map_err(|e| Report::new(SerializedWorkerFailure(e.error)).change_context(TaskError::Failed(e.retryable)))
+                .map_err(|e| Report::new(SerializedWorkerFailure(e.error)).change_context(TaskError::failed(task_id, e.retryable)))
                 .attach_printable_lazy(|| format!("Job {task_id} Runtime ID {runtime_id}"))?;
 
             status_sender.add(task_id, StatusUpdateData::Success(
@@ -104,7 +104,7 @@ async fn run_subtask_internal<SUBTASK: SubTask>(
         _ = cancel.changed() => {
             task.kill().await.ok();
             status_sender.add(task_id, StatusUpdateData::Cancelled);
-            Err(Report::new(TaskError::Cancelled))
+            Err(Report::new(TaskError::cancelled(task_id)))
         }
     }
 }
@@ -120,7 +120,7 @@ mod test {
         manager::tests::TestSubTaskDef,
         spawn::{inprocess::InProcessSpawner, TaskError},
         tests::{TestSpawner, TEST_JOB_UUID},
-        StatusCollector,
+        StatusCollector, TaskErrorKind,
     };
 
     fn create_task_input<SPAWNER: TestSpawner>(
@@ -211,8 +211,8 @@ mod test {
             .expect("task result should return Some")
             .expect_err("task result should be Err");
         assert_eq!(
-            result.current_context(),
-            &TaskError::Cancelled,
+            result.current_context().kind,
+            TaskErrorKind::Cancelled,
             "task result should be Cancelled"
         );
     }
@@ -419,6 +419,6 @@ mod test {
             .await
             .expect("task result should return Some")
             .expect_err("task result should be Err");
-        assert_eq!(err.current_context(), &TaskError::DidNotStart(true));
+        assert_eq!(err.current_context().kind, TaskErrorKind::DidNotStart(true));
     }
 }

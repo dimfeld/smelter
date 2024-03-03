@@ -13,7 +13,7 @@ use crate::{
     scheduler::{SchedulerBehavior, SlowTaskBehavior},
     spawn::{inprocess::InProcessSpawner, SpawnedTask, TaskError},
     task_status::{StatusCollector, StatusUpdateData},
-    LogSender, StatusSender, SubTask, SubtaskId, TaskDefWithOutput,
+    LogSender, StatusSender, SubTask, SubtaskId, TaskDefWithOutput, TaskErrorKind,
 };
 
 pub(crate) const TEST_JOB_UUID: Uuid = Uuid::from_u128(0x01234567890abcdef);
@@ -101,7 +101,8 @@ impl<SPAWNER: TestSpawner> SubTask for TestSubTaskDef<SPAWNER> {
         logs: Option<LogSender>,
     ) -> Result<Box<dyn SpawnedTask>, Report<TaskError>> {
         if self.fail_serialize {
-            Err(FailedSerializeError {}).change_context(TaskError::TaskGenerationFailed)?;
+            Err(FailedSerializeError {})
+                .change_context(TaskError::task_generation_failed(task_id))?;
         }
 
         let task = self
@@ -152,7 +153,15 @@ impl<SPAWNER: TestSpawner> TestTask<SPAWNER> {
             }
         }
 
-        job.wait().await.change_context(TaskError::Failed(false))?;
+        job.wait().await.change_context(TaskError::failed(
+            SubtaskId {
+                job: TEST_JOB_UUID,
+                stage: 0xFFFF,
+                task: 0,
+                try_num: 0,
+            },
+            false,
+        ))?;
 
         Ok(results)
     }
@@ -295,7 +304,7 @@ async fn retry_failures() {
     let spawner = Arc::new(InProcessSpawner::new(|info| async move {
         if (info.task_id.task == 0 || info.task_id.task == 2) && info.task_id.try_num < 2 {
             info!("Failing task {}", info.task_id);
-            Err(TaskError::Failed(true))
+            Err(TaskError::failed(info.task_id, true))
         } else {
             info!("Working task {}", info.task_id);
             Ok(format!("result {}", info.task_id))
@@ -349,7 +358,7 @@ async fn permanent_failure_task_error() {
     let spawner = Arc::new(InProcessSpawner::new(|info| async move {
         if info.task_id.task == 2 {
             info!("Failing task {}", info.task_id);
-            Err(TaskError::Failed(false))
+            Err(TaskError::failed(info.task_id, false))
         } else {
             info!("Working task {}", info.task_id);
             Ok(format!("result {}", info.task_id))
@@ -379,8 +388,8 @@ async fn permanent_failure_task_error() {
 
     info!("{:?}", result);
     assert_eq!(
-        result.current_context(),
-        &TaskError::Failed(false),
+        result.current_context().kind,
+        TaskErrorKind::Failed(false),
         "Should finish with failed error"
     );
 
@@ -391,7 +400,7 @@ async fn permanent_failure_task_error() {
             item.task_id.stage == 0
                 && item.task_id.task == 2
                 && item.task_id.try_num == 0
-                && matches!(item.data, StatusUpdateData::Failed(_))
+                && matches!(item.data, StatusUpdateData::Failed(_, _))
         })
         .expect("Should find status item for failed try");
 
@@ -409,7 +418,7 @@ async fn too_many_retries() {
     let spawner = Arc::new(InProcessSpawner::new(|info| async move {
         if info.task_id.task == 2 {
             info!("Failing task {}", info.task_id);
-            Err(TaskError::Failed(true))
+            Err(TaskError::failed(info.task_id, true))
         } else {
             info!("Working task {}", info.task_id);
             Ok(format!("result {}", info.task_id))
@@ -439,8 +448,8 @@ async fn too_many_retries() {
 
     info!("{:?}", result);
     assert_eq!(
-        result.current_context(),
-        &TaskError::Failed(false),
+        result.current_context().kind,
+        TaskErrorKind::Failed(true),
         "Should finish with failed error"
     );
 
@@ -451,7 +460,7 @@ async fn too_many_retries() {
             item.task_id.stage == 0
                 && item.task_id.task == 2
                 && item.task_id.try_num == 2
-                && matches!(item.data, StatusUpdateData::Failed(_))
+                && matches!(item.data, StatusUpdateData::Failed(_, _))
         })
         .expect("Should find status item for failed final try");
 }
@@ -541,8 +550,8 @@ async fn task_payload_serialize_failure() {
 
     info!("{:?}", result);
     assert_eq!(
-        result.current_context(),
-        &TaskError::Failed(false),
+        result.current_context().kind,
+        TaskErrorKind::TaskGenerationFailed,
         "Should finish with failed error"
     );
 
@@ -553,7 +562,7 @@ async fn task_payload_serialize_failure() {
             item.task_id.stage == 0
                 && item.task_id.task == 2
                 && item.task_id.try_num == 0
-                && matches!(item.data, StatusUpdateData::Failed(_))
+                && matches!(item.data, StatusUpdateData::Failed(_, _))
         })
         .expect("Should find status item for failed try");
 
@@ -710,11 +719,8 @@ async fn cancel_job() {
 
     manager.cancel();
 
-    let task_results = stage_rx.collect().await.expect("done?");
-    assert!(
-        task_results.len() < num_tasks,
-        "All tasks should not have finished"
-    );
+    let task_results = stage_rx.collect().await.expect_err("done");
+    println!("task results: {:?}", task_results);
     let err = job
         .wait()
         .await

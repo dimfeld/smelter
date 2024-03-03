@@ -53,11 +53,12 @@ where
         input: impl Serialize + Send,
     ) -> Result<InProcessSpawnedTask, Report<TaskError>> {
         if self.fail_to_spawn {
-            return Err(Report::new(TaskError::DidNotStart(true)));
+            return Err(Report::new(TaskError::did_not_start(task_id, true)));
         }
 
         let task_fn = self.task_fn.clone();
-        let input = serde_json::to_vec(&input).change_context(TaskError::TaskGenerationFailed)?;
+        let input = serde_json::to_vec(&input)
+            .change_context(TaskError::task_generation_failed(task_id))?;
         let task = InProcessSpawnedTask {
             task_id,
             task: Some(tokio::task::spawn(async move {
@@ -107,7 +108,8 @@ impl SpawnedTask for InProcessSpawnedTask {
             Err(e) => WorkerResult::Err(WorkerError::from_error(true, e)),
         };
 
-        let result = serde_json::to_vec(&result).change_context(TaskError::Failed(true))?;
+        let result =
+            serde_json::to_vec(&result).change_context(TaskError::failed(self.task_id, true))?;
 
         Ok(result)
     }

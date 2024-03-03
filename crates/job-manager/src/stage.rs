@@ -12,7 +12,7 @@ use crate::{
     run_subtask::{run_subtask, SubtaskPayload, SubtaskSyncs},
     spawn::TaskError,
     SchedulerBehavior, SlowTaskBehavior, StatusSender, StatusUpdateData, SubTask, SubtaskId,
-    TaskDefWithOutput,
+    TaskDefWithOutput, TaskErrorKind,
 };
 
 /// Information to run a task as well as which retry we're on.
@@ -201,7 +201,10 @@ pub(crate) async fn run_tasks_stage<SUBTASK: SubTask>(
         };
 
         if e.current_context().retryable() && task_info.try_num < scheduler.max_retries {
-            status_sender.add(task_id, StatusUpdateData::Retry(format!("{e:?}")));
+            status_sender.add(
+                task_id,
+                StatusUpdateData::Retry(e.current_context().kind.clone(), format!("{e:?}")),
+            );
             task_info.try_num += 1;
             spawn_task(
                 task_index,
@@ -211,7 +214,10 @@ pub(crate) async fn run_tasks_stage<SUBTASK: SubTask>(
             );
             Ok(())
         } else {
-            status_sender.add(task_id, StatusUpdateData::Failed(format!("{e:?}")));
+            status_sender.add(
+                task_id,
+                StatusUpdateData::Failed(e.current_context().kind.clone(), format!("{e:?}")),
+            );
             Err(e)
         }
     };
@@ -260,16 +266,18 @@ pub(crate) async fn run_tasks_stage<SUBTASK: SubTask>(
                                     // Re-enqueue all unfinished tasks. Some serverless platforms
                                     // can have very high tail latency, so this gets around that issue.
                                     for (i, task) in unfinished.iter_mut() {
-                                        status_sender.add(
-                                            SubtaskId {
+                                        let id = SubtaskId {
                                                 job,
                                                 stage: stage_index as u16,
                                                 task: *i as u32,
                                                 try_num: task.try_num as u16,
-                                            },
-                                            StatusUpdateData::Retry(format!("{:?}", Report::new(
-                                                TaskError::TailRetry,
-                                            ))),
+                                            };
+                                        status_sender.add(
+                                            id,
+                                            StatusUpdateData::Retry(
+                                                TaskErrorKind::TailRetry,
+                                                format!("{:?}", Report::new(TaskError::tail_retry(id))),
+                                            ),
                                         );
 
                                         task.try_num += 1;
@@ -281,15 +289,35 @@ pub(crate) async fn run_tasks_stage<SUBTASK: SubTask>(
                         // Task finished with an error.
                         Ok(Some(Err(e))) => {
                             if let Some(task_info) = unfinished.get_mut(&task_index) {
-                                retry_or_fail(&mut running_tasks, e, task_index, task_info)?;
+                                if let Err(e) = retry_or_fail(&mut running_tasks, e, task_index, task_info) {
+                                    let retryable = e.current_context().retryable();
+                                    subtask_result_tx.send_async(Err(e)).await.ok();
+
+                                    let id = SubtaskId {
+                                        job,
+                                        stage: stage_index as u16,
+                                        task: task_index as u32,
+                                        try_num: task_info.try_num as u16,
+                                    };
+                                    return Err(Report::new(TaskError::failed(id, retryable)));
+                                }
                             }
                         }
                         // Task panicked. We can't really decipher the error so always consider it
                         // retryable.
                         Err(e) => {
                             if let Some(task_info) = unfinished.get_mut(&task_index) {
-                                let e = Report::new(e).change_context(TaskError::Failed(true));
-                                retry_or_fail(&mut running_tasks, e, task_index, task_info)?;
+                                let id = SubtaskId {
+                                    job,
+                                    stage: stage_index as u16,
+                                    task: task_index as u32,
+                                    try_num: task_info.try_num as u16,
+                                };
+                                let e = Report::new(e).change_context(TaskError::failed(id, true));
+                                if let Err(e) = retry_or_fail(&mut running_tasks, e, task_index, task_info) {
+                                    subtask_result_tx.send_async(Err(e)).await.ok();
+                                    return Err(Report::new(TaskError::failed(id, true)));
+                                }
                             }
                         }
                     }

@@ -6,9 +6,7 @@ use serde::{de::DeserializeOwned, Deserialize, Serialize};
 use uuid::Uuid;
 
 /// The ID for a subtask, which uniquely identifies it within a [Job].
-#[derive(Debug, Copy, Clone)]
-#[cfg_attr(feature = "worker-side", derive(Serialize))]
-#[cfg_attr(feature = "spawner-side", derive(Deserialize))]
+#[derive(Debug, Copy, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
 pub struct SubtaskId {
     pub job: Uuid,
     /// Which stage the subtask is running on.

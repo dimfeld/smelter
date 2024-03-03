@@ -2530,6 +2530,7 @@ dependencies = [
  "smelter-job-manager",
  "smelter-worker",
  "tempfile",
+ "thiserror",
  "tokio",
  "tokio-stream",
  "tracing",

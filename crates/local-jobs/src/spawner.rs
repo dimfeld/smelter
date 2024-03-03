@@ -44,22 +44,22 @@ impl LocalSpawner {
 
         let mut input_file = tokio::fs::File::create(&input_path)
             .await
-            .change_context(TaskError::DidNotStart(false))
+            .change_context(TaskError::did_not_start(task_id, false))
             .attach_printable("Failed to create temporary directory for input")?;
 
         let input = serde_json::to_vec(&WorkerInput::new(task_id, input))
-            .change_context(TaskError::TaskGenerationFailed)?;
+            .change_context(TaskError::task_generation_failed(task_id))?;
 
         input_file
             .write_all(&input)
             .await
-            .change_context(TaskError::DidNotStart(false))
+            .change_context(TaskError::did_not_start(task_id, false))
             .attach_printable("Failed to write input definition")?;
 
         input_file
             .flush()
             .await
-            .change_context(TaskError::DidNotStart(false))
+            .change_context(TaskError::did_not_start(task_id, false))
             .attach_printable("Failed to write input definition")?;
 
         if log_collector.is_some() {
@@ -70,7 +70,7 @@ impl LocalSpawner {
             .env("INPUT_FILE", &input_path)
             .env("OUTPUT_FILE", &output_path)
             .spawn()
-            .change_context(TaskError::DidNotStart(false))?;
+            .change_context(TaskError::did_not_start(task_id, false))?;
 
         if let Some(collector) = log_collector {
             {
@@ -100,6 +100,7 @@ impl LocalSpawner {
         }
 
         Ok(LocalSpawnedTask {
+            task_id,
             input_path,
             output_path,
             child_process,
@@ -110,6 +111,7 @@ impl LocalSpawner {
 
 /// A handled to a task spawned by a [LocalSpawner]
 pub struct LocalSpawnedTask {
+    task_id: SubtaskId,
     input_path: PathBuf,
     output_path: PathBuf,
     child_process: tokio::process::Child,
@@ -123,12 +125,12 @@ impl LocalSpawnedTask {
         self.persist = true;
     }
 
-    fn handle_exit_status(status: ExitStatus) -> Result<(), Report<TaskError>> {
+    fn handle_exit_status(&self, status: ExitStatus) -> Result<(), Report<TaskError>> {
         if status.success() {
             Ok(())
         } else {
             let retryable = status.code().unwrap_or(-1) == 2;
-            Err(TaskError::Failed(retryable)).attach_printable_lazy(|| {
+            Err(TaskError::failed(self.task_id, retryable)).attach_printable_lazy(|| {
                 format!(
                     "Task failed with code {code}",
                     code = status.code().unwrap_or(-1)
@@ -144,14 +146,14 @@ impl SpawnedTask for LocalSpawnedTask {
         self.child_process
             .id()
             .map(|id| id.to_string())
-            .ok_or(TaskError::Lost)
+            .ok_or(TaskError::lost(self.task_id))
     }
 
     async fn kill(&mut self) -> Result<(), Report<TaskError>> {
         self.child_process
             .kill()
             .await
-            .change_context(TaskError::Failed(false))
+            .change_context(TaskError::failed(self.task_id, false))
     }
 
     async fn wait(&mut self) -> Result<Vec<u8>, Report<TaskError>> {
@@ -159,18 +161,18 @@ impl SpawnedTask for LocalSpawnedTask {
             .child_process
             .wait()
             .await
-            .change_context(TaskError::Lost)?;
+            .change_context(TaskError::lost(self.task_id))?;
 
-        Self::handle_exit_status(result)?;
+        self.handle_exit_status(result)?;
 
         let mut file = tokio::fs::File::open(&self.output_path)
             .await
-            .change_context(TaskError::Failed(true))
+            .change_context(TaskError::failed(self.task_id, true))
             .attach_printable_lazy(|| self.output_path.display().to_string())?;
         let mut data = Vec::new();
         file.read_to_end(&mut data)
             .await
-            .change_context(TaskError::Failed(true))?;
+            .change_context(TaskError::failed(self.task_id, true))?;
         Ok(data)
     }
 }

@@ -6,7 +6,6 @@
 use std::{fmt::Debug, path::PathBuf};
 
 use error_stack::{Report, ResultExt};
-use smelter_job_manager::TaskError;
 use smelter_worker::{WorkerInput, WorkerResult};
 
 pub mod spawner;
@@ -20,14 +19,24 @@ pub struct LocalWorkerInfo {
     pub output: PathBuf,
 }
 
+#[derive(thiserror::Error, Debug)]
+pub enum LocalWorkerError {
+    #[error("Error reading environment variables")]
+    Environment,
+    #[error("Error reading input payload")]
+    ReadPayload,
+    #[error("Error writing output payload")]
+    WritePayload,
+}
+
 impl LocalWorkerInfo {
     /// Read the LocalWorkerInfo from the environment
-    pub fn from_env() -> Result<Self, Report<TaskError>> {
+    pub fn from_env() -> Result<Self, Report<LocalWorkerError>> {
         let input = std::env::var("INPUT_FILE")
-            .change_context(TaskError::Failed(false))
+            .change_context(LocalWorkerError::Environment)
             .attach_printable("Missing INPUT_FILE environment variable")?;
         let output = std::env::var("OUTPUT_FILE")
-            .change_context(TaskError::Failed(false))
+            .change_context(LocalWorkerError::Environment)
             .attach_printable("Missing OUTPUT_FILE environment variable")?;
 
         Ok(LocalWorkerInfo {
@@ -40,19 +49,19 @@ impl LocalWorkerInfo {
     /// sense for your task.
     pub async fn read_input<PAYLOAD: serde::de::DeserializeOwned + Send + 'static>(
         &self,
-    ) -> Result<WorkerInput<PAYLOAD>, Report<TaskError>> {
+    ) -> Result<WorkerInput<PAYLOAD>, Report<LocalWorkerError>> {
         let input = self.input.clone();
         let worker_input = tokio::task::spawn_blocking(move || {
             let file = std::fs::File::open(&input)
-                .change_context(TaskError::Failed(true))
+                .change_context(LocalWorkerError::ReadPayload)
                 .attach_printable_lazy(|| input.display().to_string())?;
             let file = std::io::BufReader::new(file);
 
             serde_json::from_reader::<_, WorkerInput<PAYLOAD>>(file)
-                .change_context(TaskError::Failed(true))
+                .change_context(LocalWorkerError::ReadPayload)
         })
         .await
-        .change_context(TaskError::Failed(true))??;
+        .change_context(LocalWorkerError::ReadPayload)??;
 
         worker_input.propagate_tracing_context();
         Ok(worker_input)
@@ -63,7 +72,7 @@ impl LocalWorkerInfo {
     pub async fn write_output<DATA: Debug>(
         &self,
         result: impl Into<WorkerResult<DATA>>,
-    ) -> Result<(), Report<TaskError>>
+    ) -> Result<(), Report<LocalWorkerError>>
     where
         DATA: serde::Serialize + Send + 'static,
     {
@@ -71,12 +80,12 @@ impl LocalWorkerInfo {
         let output = self.output.clone();
         tokio::task::spawn_blocking(move || {
             let file = std::fs::File::create(&output)
-                .change_context(TaskError::Failed(true))
+                .change_context(LocalWorkerError::WritePayload)
                 .attach_printable_lazy(|| output.display().to_string())?;
             let mut file = std::io::BufWriter::new(file);
-            serde_json::to_writer(&mut file, &result).change_context(TaskError::Failed(true))
+            serde_json::to_writer(&mut file, &result).change_context(LocalWorkerError::WritePayload)
         })
         .await
-        .change_context(TaskError::Failed(true))?
+        .change_context(LocalWorkerError::WritePayload)?
     }
 }
