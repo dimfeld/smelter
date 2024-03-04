@@ -120,7 +120,7 @@ impl FargateWorker {
             .into_bytes();
 
         let payload = serde_json::from_slice(body.as_ref())
-            .change_context(WrapperError::ReadInput)
+            .change_context(WrapperError::UnexpectedInput)
             .attach_printable("Deserializing input payload")?;
 
         let input = WorkerInput {

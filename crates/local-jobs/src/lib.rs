@@ -48,7 +48,7 @@ impl LocalWorkerInfo {
             let file = std::io::BufReader::new(file);
 
             serde_json::from_reader::<_, WorkerInput<PAYLOAD>>(file)
-                .change_context(WrapperError::ReadInput)
+                .change_context(WrapperError::UnexpectedInput)
         })
         .await
         .change_context(WrapperError::ReadInput)??;

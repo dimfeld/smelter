@@ -179,16 +179,20 @@ pub enum WrapperError {
     /// Failed to read the input payload
     #[error("Failed to read input payload")]
     ReadInput,
+    #[error("Unexpected input payload format")]
+    UnexpectedInput,
     /// Failed to write the output payload
     #[error("Failed to write output payload")]
     WriteOutput,
 }
 
 impl WrapperError {
+    /// Whether the error indicates a failure that could possibly be retried, or not
     pub fn retryable(&self) -> bool {
         match self {
             WrapperError::Initializing => false,
             WrapperError::ReadInput => true,
+            WrapperError::UnexpectedInput => false,
             WrapperError::WriteOutput => true,
         }
     }
