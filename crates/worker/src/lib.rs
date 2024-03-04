@@ -1,3 +1,8 @@
+#![warn(missing_docs)]
+#![warn(clippy::missing_docs_in_private_items)]
+
+//! Common code used for communicating between the job manager and worker tasks.
+
 use std::{collections::HashMap, fmt::Debug, io::Read};
 
 #[cfg(feature = "opentelemetry")]
@@ -12,6 +17,7 @@ pub mod stats;
 /// The ID for a subtask, which uniquely identifies it within a [Job].
 #[derive(Debug, Copy, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
 pub struct SubtaskId {
+    /// The ID of the job.
     pub job: Uuid,
     /// Which stage the subtask is running on.
     pub stage: u16,
@@ -45,6 +51,7 @@ pub fn get_trace_context() -> HashMap<String, String> {
     fields
 }
 
+/// If tracing is enabled, propagate the trace context from the spawner into the current span.
 pub fn propagate_tracing_context(trace_context: &HashMap<String, String>) {
     #![allow(unused_variables)]
     #[cfg(feature = "opentelemetry")]
@@ -62,16 +69,22 @@ pub fn propagate_tracing_context(trace_context: &HashMap<String, String>) {
 #[derive(Debug)]
 #[cfg_attr(feature = "worker-side", derive(Serialize))]
 #[cfg_attr(feature = "spawner-side", derive(Deserialize))]
+/// The input payload that a worker will read when starting
 pub struct WorkerInput<T> {
+    /// The ID for this task
     pub task_id: SubtaskId,
     #[cfg(feature = "opentelemetry")]
     #[serde(default)]
+    /// Propragated trace context so that this worker can show up as a child of the parent span
+    /// from the spawner.
     pub trace_context: std::collections::HashMap<String, String>,
+    /// Worker-specific input data
     pub input: T,
 }
 
 #[cfg(feature = "spawner-side")]
 impl<T> WorkerInput<T> {
+    /// Create a new [WorkerInput]
     pub fn new(task_id: SubtaskId, input: T) -> Self {
         #[cfg(feature = "opentelemetry")]
         let trace_context = get_trace_context();
@@ -87,6 +100,7 @@ impl<T> WorkerInput<T> {
 
 #[cfg(feature = "worker-side")]
 impl<T: DeserializeOwned + 'static> WorkerInput<T> {
+    /// Propagate the trace context from the spawner into the current span.
     pub fn propagate_tracing_context(&self) {
         #[cfg(feature = "opentelemetry")]
         {
@@ -107,8 +121,11 @@ impl<T: DeserializeOwned + 'static> WorkerInput<T> {
 #[cfg_attr(feature = "worker-side", derive(Serialize))]
 #[cfg_attr(feature = "spawner-side", derive(Deserialize))]
 #[derive(Debug)]
+/// A serializable error returned from a worker
 pub struct WorkerError {
+    /// Whether the task can be retried after this error, or not
     pub retryable: bool,
+    /// The serialized error
     pub error: String,
 }
 
@@ -138,14 +155,18 @@ impl<E: std::error::Error> From<E> for WorkerError {
 #[cfg_attr(feature = "worker-side", derive(Serialize))]
 #[cfg_attr(feature = "spawner-side", derive(Deserialize))]
 #[derive(Debug)]
+/// The output payload that the worker writes when a task finishes.
 pub struct WorkerOutput<T: Debug> {
+    /// The result of the task code
     pub result: WorkerResult<T>,
     #[cfg(feature = "stats")]
+    /// OS-level statistics about the task
     pub stats: Option<crate::stats::Statistics>,
 }
 
 #[cfg(feature = "spawner-side")]
 impl<T: Debug + DeserializeOwned> WorkerOutput<T> {
+    /// Deserialize a WorkerOutput from a worker's output payload
     pub fn from_output_payload(data: &[u8]) -> WorkerOutput<T> {
         match serde_json::from_slice::<WorkerOutput<T>>(data) {
             Ok(output) => output,
@@ -162,12 +183,16 @@ impl<T: Debug + DeserializeOwned> WorkerOutput<T> {
 #[cfg_attr(feature = "spawner-side", derive(Deserialize))]
 #[derive(Debug)]
 #[serde(tag = "type", content = "data", rename_all = "snake_case")]
+/// The result of a worker task
 pub enum WorkerResult<T: Debug> {
+    /// The result data from the worker when it succeeded
     Ok(T),
+    /// The error from the worker when it failed
     Err(WorkerError),
 }
 
 impl<T: Debug> WorkerResult<T> {
+    /// Convert a [WorkerResult] into a [std::result::Result]
     pub fn into_result(self) -> Result<T, WorkerError> {
         match self {
             WorkerResult::Ok(r) => Ok(r),
@@ -203,6 +228,7 @@ pub enum WrapperError {
     /// Failed to read the input payload
     #[error("Failed to read input payload")]
     ReadInput,
+    /// The input payload could not be serialized into the structure that the worker expected
     #[error("Unexpected input payload format")]
     UnexpectedInput,
     /// Failed to write the output payload

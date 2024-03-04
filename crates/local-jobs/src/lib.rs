@@ -6,7 +6,7 @@
 use std::{fmt::Debug, path::PathBuf};
 
 use error_stack::{Report, ResultExt};
-use smelter_worker::{WorkerInput, WorkerOutput, WorkerResult, WrapperError};
+use smelter_worker::{WorkerInput, WorkerOutput, WrapperError};
 
 pub mod spawner;
 

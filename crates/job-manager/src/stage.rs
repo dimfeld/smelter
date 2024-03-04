@@ -88,6 +88,7 @@ impl<SUBTASK: SubTask> JobStageResultReceiver<SUBTASK> {
         self.rx.is_disconnected()
     }
 
+    /// Receive the next finished task.
     pub async fn recv(&self) -> Option<Result<TaskDefWithOutput<SUBTASK>, Report<TaskError>>> {
         self.rx.recv_async().await.ok()
     }

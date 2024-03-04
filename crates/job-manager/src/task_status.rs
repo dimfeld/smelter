@@ -4,28 +4,46 @@ use parking_lot::Mutex;
 
 use crate::{SubtaskId, TaskErrorKind};
 
+/// Information about a spawned task
 #[derive(Debug, Clone)]
 pub struct StatusUpdateSpawnedData {
+    /// The ID of the task in the in the system that is hosting it
     pub runtime_id: String,
 }
 
+/// Information about a successful task
 #[derive(Debug, Clone)]
 pub struct StatusUpdateSuccessData {
+    /// The raw output payload from the task. This should be a [WorkerOutput] object.
     pub output: Vec<u8>,
+    /// If enabled, OS-level statistics from the task's process
     pub stats: Option<smelter_worker::stats::Statistics>,
 }
 
+/// Types of status updates
 #[derive(Debug, Clone)]
 pub enum StatusUpdateData {
+    /// A task was spawned
     Spawned(StatusUpdateSpawnedData),
+    /// A task was retried, with the given failure reason
     Retry(TaskErrorKind, String),
+    /// A task failed and could not be retried
     Failed(TaskErrorKind, String),
-    Log { stdout: bool, message: String },
+    /// A task emitted a log message
+    Log {
+        /// True if the message was from stdout. False if it was from stderr
+        stdout: bool,
+        /// The log message
+        message: String,
+    },
+    /// A task was cancelled
     Cancelled,
+    /// A task finished successfully
     Success(StatusUpdateSuccessData),
 }
 
 impl StatusUpdateData {
+    /// Apply a custom format for this status
     pub fn custom_format<'a>(
         &'a self,
         format: &'a StatusUpdateCustomFormatOptions,
@@ -39,44 +57,43 @@ impl StatusUpdateData {
 
 impl Display for StatusUpdateData {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        match self {
-            StatusUpdateData::Spawned(data) => write!(f, "Spawned ID {}", data.runtime_id),
-            StatusUpdateData::Retry(kind, _) => write!(f, "Retry: {}", kind),
-            StatusUpdateData::Failed(kind, _) => write!(f, "Failed: {}", kind),
-            StatusUpdateData::Log { stdout, message } => {
-                if *stdout {
-                    write!(f, "Stdout: {}", message)
-                } else {
-                    write!(f, "Stderr: {}", message)
-                }
-            }
-            StatusUpdateData::Cancelled => write!(f, "Cancelled"),
-            StatusUpdateData::Success(data) => {
-                write!(f, "Success: {}", String::from_utf8_lossy(&data.output))
-            }
-        }
+        let verbose = StatusUpdateCustomFormatOptions::default();
+        self.custom_format(&verbose).fmt(f)
     }
 }
 
+/// Verbosity levels for printing status fields
 #[derive(Debug, Clone, Default)]
 pub enum Verbosity {
+    /// Print terse information and omit log messages
     Short,
+    /// Print a useful amount of log information
     #[default]
     Standard,
+    /// Print extra log information that is mostly useful for debugging
     Full,
 }
 
+/// Verbosity levels for printing status fields
 #[derive(Debug, Clone, Default)]
 pub struct StatusUpdateCustomFormatOptions {
+    /// Verbosity level for [StatusUpdateData::Spawned]
     pub spawned: Verbosity,
+    /// Verbosity level for [StatusUpdateData::Retry]
     pub retry: Verbosity,
+    /// Verbosity level for [StatusUpdateData::Failed]
     pub failed: Verbosity,
+    /// Verbosity level for [StatusUpdateData::Log]
     pub log: Verbosity,
+    /// Verbosity level for [StatusUpdateData::Success]
     pub success: Verbosity,
 }
 
+/// A formatter for a [StatusUpdateData] with custom levels of [Verbosity] for each field
 pub struct StatusUpdateDataDisplayCustom<'a> {
+    /// The verbosity settings to use
     pub format: &'a StatusUpdateCustomFormatOptions,
+    /// The data to print
     pub data: &'a StatusUpdateData,
 }
 
@@ -101,7 +118,7 @@ impl Display for StatusUpdateDataDisplayCustom<'_> {
             StatusUpdateData::Log { message, stdout } => {
                 let dest = if *stdout { "Stdout" } else { "Stderr" };
                 match self.format.log {
-                    Verbosity::Short => write!(f, "Log"),
+                    Verbosity::Short => Ok(()),
                     Verbosity::Standard => write!(f, "{dest}: {}", message),
                     Verbosity::Full => write!(f, "Log {dest}: {}", message),
                 }
@@ -109,12 +126,19 @@ impl Display for StatusUpdateDataDisplayCustom<'_> {
             StatusUpdateData::Cancelled => write!(f, "Cancelled"),
             StatusUpdateData::Success(data) => match self.format.success {
                 Verbosity::Short => write!(f, "Success"),
-                Verbosity::Standard => write!(f, "Success"),
-                Verbosity::Full => {
-                    write!(f, "Success: {}", String::from_utf8_lossy(&data.output))?;
+                Verbosity::Standard => {
+                    write!(f, "Success")?;
                     if let Some(stats) = &data.stats {
-                        write!(f, " ({stats:?})")?;
+                        write!(f, " ({stats})")?;
                     }
+                    Ok(())
+                }
+                Verbosity::Full => {
+                    write!(f, "Success")?;
+                    if let Some(stats) = &data.stats {
+                        write!(f, " ({stats})")?;
+                    }
+                    write!(f, " Payload: {}", String::from_utf8_lossy(&data.output))?;
                     Ok(())
                 }
             },
@@ -122,14 +146,19 @@ impl Display for StatusUpdateDataDisplayCustom<'_> {
     }
 }
 
+/// A task status update
 #[derive(Debug, Clone)]
 pub struct StatusUpdateItem {
+    /// The ID of the task
     pub task_id: SubtaskId,
+    /// The timestamp of the update
     pub timestamp: time::OffsetDateTime,
+    /// The data of the update
     pub data: StatusUpdateData,
 }
 
 impl StatusUpdateItem {
+    /// Create a custom formatter for this item
     pub fn custom_format<'a>(
         &'a self,
         format: &'a StatusUpdateCustomFormatOptions,
@@ -139,6 +168,7 @@ impl StatusUpdateItem {
 }
 
 impl StatusUpdateItem {
+    /// Write timestamp and task ID from the item, without the data.
     pub fn write_header(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         let time = self.timestamp.time();
         write!(
@@ -161,6 +191,8 @@ impl Display for StatusUpdateItem {
     }
 }
 
+/// A formatter for a [StatusUpdateItem] with custom levels of [Verbosity] for each field in the
+/// [StatusUpdateData]
 pub struct StatusUpdateItemCustomFormat<'a> {
     format: &'a StatusUpdateCustomFormatOptions,
     item: &'a StatusUpdateItem,
@@ -186,6 +218,7 @@ pub struct LogSender {
 }
 
 impl LogSender {
+    /// Send a log from a task
     pub fn send(&self, stdout: bool, message: String) {
         self.sender
             .add(self.task_id, StatusUpdateData::Log { stdout, message });
@@ -200,6 +233,7 @@ impl std::fmt::Debug for LogSender {
     }
 }
 
+/// A channel that can be used to send status updates from the job manager
 #[derive(Clone)]
 pub struct StatusSender {
     tx: flume::Sender<StatusUpdateItem>,
@@ -239,8 +273,10 @@ impl StatusSender {
     }
 }
 
+/// Collects status messages into a buffer which can be drained on command
 #[derive(Clone)]
 pub struct StatusCollector {
+    /// Send status updates into this [StatusCollector]
     pub sender: StatusSender,
     buffer: Arc<Mutex<Vec<StatusUpdateItem>>>,
 }
@@ -264,6 +300,7 @@ impl StatusCollector {
         StatusCollector { sender, buffer }
     }
 
+    /// Send a status update
     pub fn add(&self, task_id: SubtaskId, data: impl Into<StatusUpdateData>) {
         self.sender.add(task_id, data);
     }

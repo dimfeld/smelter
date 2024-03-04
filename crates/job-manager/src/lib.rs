@@ -1,5 +1,5 @@
-// #![warn(missing_docs)]
-// #![warn(clippy::missing_docs_in_private_items)]
+#![warn(missing_docs)]
+#![warn(clippy::missing_docs_in_private_items)]
 
 //! Manage and run jobs for Smelter
 

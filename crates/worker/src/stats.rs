@@ -1,6 +1,11 @@
+//! Worker statistics collection
+
+use std::fmt::Display;
+
 use serde::{Deserialize, Serialize};
 use sysinfo::System;
 
+/// OS-level statistics about the task
 #[cfg_attr(feature = "worker-side", derive(Serialize))]
 #[cfg_attr(feature = "spawner-side", derive(Deserialize))]
 #[derive(Clone, Debug)]
@@ -17,12 +22,46 @@ pub struct Statistics {
     uptime_at_end: u64,
 }
 
+impl Display for Statistics {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(
+            f,
+            "load: avg {}, max {}, max_ram: {}MiB, start_at: ",
+            self.avg_load_average,
+            self.max_load_average,
+            (self.max_ram_used as f64 / 1048576.0).round(),
+        )?;
+
+        Self::write_uptime_duration(f, self.uptime_at_start)?;
+        write!(f, ", took: ")?;
+        Self::write_uptime_duration(f, self.uptime_at_end - self.uptime_at_start)?;
+        Ok(())
+    }
+}
+
+impl Statistics {
+    fn write_uptime_duration(f: &mut std::fmt::Formatter<'_>, uptime: u64) -> std::fmt::Result {
+        let days = uptime / 86400;
+        let hours = (uptime % 86400) / 3600;
+        let minutes = (uptime % 3600) / 60;
+        let seconds = uptime % 60;
+        match (days, hours, minutes, seconds) {
+            (0, 0, 0, _) => write!(f, "{}s", seconds),
+            (0, 0, _, _) => write!(f, "{}m{}s", minutes, seconds),
+            (0, _, _, _) => write!(f, "{}h{}m{}s", hours, minutes, seconds),
+            (_, _, _, _) => write!(f, "{}d{}h{}m{}s", days, hours, minutes, seconds),
+        }
+    }
+}
+
+/// Runs a task that periodically collects statistics
 pub struct StatisticsTracker {
     close_tx: tokio::sync::oneshot::Sender<()>,
     task_handle: tokio::task::JoinHandle<Statistics>,
 }
 
 impl StatisticsTracker {
+    /// Close the collection task and return the collected [Statistics]
     pub async fn finish(self) -> Option<Statistics> {
         drop(self.close_tx);
         self.task_handle.await.ok()

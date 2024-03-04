@@ -5,9 +5,12 @@ use error_stack::Report;
 use smelter_worker::SubtaskId;
 use thiserror::Error;
 
+/// An error that occurred in a job stage
 #[derive(Debug)]
 pub struct StageError {
+    /// The index of the stage
     pub stage: usize,
+    /// True if the stage failed because it was cancelled
     pub cancelled: bool,
 }
 
@@ -34,9 +37,12 @@ impl std::fmt::Display for StageError {
 #[error("{0}")]
 pub struct SerializedWorkerFailure(pub String);
 
+/// An error that occurred in a subtask
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct TaskError {
+    /// The ID of the task
     pub task_id: SubtaskId,
+    /// The error that occurred
     pub kind: TaskErrorKind,
 }
 
@@ -49,38 +55,47 @@ impl std::fmt::Display for TaskError {
 }
 
 impl TaskError {
+    /// Create a new TaskError
     pub fn new(task_id: SubtaskId, kind: TaskErrorKind) -> Self {
         Self { task_id, kind }
     }
 
+    /// Create a new TaskError::DidNotStart
     pub fn did_not_start(task_id: SubtaskId, retryable: bool) -> Self {
         Self::new(task_id, TaskErrorKind::DidNotStart(retryable))
     }
 
+    /// Create a new TaskError::TimedOut
     pub fn timed_out(task_id: SubtaskId) -> Self {
         Self::new(task_id, TaskErrorKind::TimedOut)
     }
 
+    /// Create a new TaskError::Lost
     pub fn lost(task_id: SubtaskId) -> Self {
         Self::new(task_id, TaskErrorKind::Lost)
     }
 
+    /// Create a new TaskError::Cancelled
     pub fn cancelled(task_id: SubtaskId) -> Self {
         Self::new(task_id, TaskErrorKind::Cancelled)
     }
 
+    /// Create a new TaskError::Failed
     pub fn failed(task_id: SubtaskId, retryable: bool) -> Self {
         Self::new(task_id, TaskErrorKind::Failed(retryable))
     }
 
+    /// Create a new TaskError::TaskGenerationFailed
     pub fn task_generation_failed(task_id: SubtaskId) -> Self {
         Self::new(task_id, TaskErrorKind::TaskGenerationFailed)
     }
 
+    /// Create a new TaskError::TailRetry
     pub fn tail_retry(task_id: SubtaskId) -> Self {
         Self::new(task_id, TaskErrorKind::TailRetry)
     }
 
+    /// Return true if the error is retryable
     pub fn retryable(&self) -> bool {
         self.kind.retryable()
     }
@@ -118,6 +133,7 @@ pub enum TaskErrorKind {
 }
 
 impl TaskErrorKind {
+    /// Return true if the error is retryable
     pub fn retryable(&self) -> bool {
         match self {
             Self::DidNotStart(retryable) => *retryable,
@@ -131,9 +147,11 @@ impl TaskErrorKind {
     }
 }
 
+/// A trait representing a spawned task in the system. Task spawners should return a structure
+/// that implements this trait.
 #[async_trait::async_trait]
 pub trait SpawnedTask: Send + Sync + 'static {
-    /// The internal ID of the spawned task in the runtime, when accessible.
+    /// The internal ID of the spawned task in the runtime, if known.
     async fn runtime_id(&self) -> Result<String, TaskError>;
     /// Return a future that resolves when a task finishes.
     async fn wait(&mut self) -> Result<Vec<u8>, Report<TaskError>>;

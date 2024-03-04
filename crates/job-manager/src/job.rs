@@ -70,6 +70,7 @@ impl Job {
         }
     }
 
+    /// The unique ID of the job
     pub fn id(&self) -> Uuid {
         self.id
     }
