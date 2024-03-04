@@ -26,7 +26,7 @@ impl Display for Statistics {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         write!(
             f,
-            "load: avg {}, max {}, max_ram: {}MiB, start_at: ",
+            "load: avg {:.2}, max {:.2}, max_ram: {}MiB, start_at: ",
             self.avg_load_average,
             self.max_load_average,
             (self.max_ram_used as f64 / 1048576.0).round(),
