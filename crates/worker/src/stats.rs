@@ -11,15 +11,15 @@ use sysinfo::System;
 #[derive(Clone, Debug)]
 pub struct Statistics {
     /// The average one-minute load average throughout the task
-    avg_load_average: f64,
+    pub avg_load_average: f64,
     /// The maximum one-minute load average throughout the task
-    max_load_average: f64,
+    pub max_load_average: f64,
     /// The maximum amount of RAM used, in bytes.
-    max_ram_used: u64,
+    pub max_ram_used: u64,
     /// The system uptime when the worker started running
-    uptime_at_start: u64,
+    pub uptime_at_start: u64,
     /// System uptime when the worker finished running
-    uptime_at_end: u64,
+    pub uptime_at_end: u64,
 }
 
 impl Display for Statistics {
