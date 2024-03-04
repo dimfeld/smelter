@@ -188,8 +188,20 @@ impl FargateSpawner {
             .map_err(AwsError::from)
             .change_context(TaskError::did_not_start(task_id, false))
             .attach_printable("Failed to start task")?;
-        // look at task.failures
-        let task = task.tasks.and_then(|v| v.into_iter().next()).unwrap();
+
+        if let Some(failures) = &task.failures {
+            if !failures.is_empty() {
+                return Err(Report::new(TaskError::did_not_start(task_id, true))
+                    .attach_printable(format!("Task failed: {failures:?}")));
+            }
+        }
+
+        let task = task.tasks.and_then(|v| v.into_iter().next());
+
+        let Some(task) = task else {
+            return Err(Report::new(TaskError::did_not_start(task_id, true))
+                .attach_printable("No tasks found in response"));
+        };
 
         Ok(SpawnedFargateContainer {
             task_id,
