@@ -5,9 +5,9 @@ use aws_sdk_s3::primitives::ByteStream;
 use error_stack::{Report, ResultExt};
 use serde::{de::DeserializeOwned, Serialize};
 use smelter_worker::{
-    propagate_tracing_context, SubtaskId, WorkerError, WorkerInput, WorkerResult, WrapperError,
+    propagate_tracing_context, SubtaskId, WorkerError, WorkerInput, WorkerOutput, WorkerResult,
+    WrapperError,
 };
-use thiserror::Error;
 use tracing::{event, Level};
 
 use crate::{AwsError, INPUT_LOCATION_VAR, OTEL_CONTEXT_VAR, OUTPUT_LOCATION_VAR, SUBTASK_ID_VAR};
@@ -136,14 +136,14 @@ impl FargateWorker {
     /// Write the worker result to a location that the spawner expects to find it.
     pub async fn write_output<DATA: Debug>(
         &self,
-        result: impl Into<WorkerResult<DATA>>,
+        result: WorkerOutput<DATA>,
     ) -> Result<(), Report<WrapperError>>
     where
         DATA: serde::Serialize + Send + 'static,
     {
         let (bucket, path) = &self.output_path;
 
-        let body = serde_json::to_vec(&result.into())
+        let body = serde_json::to_vec(&result)
             .change_context(WrapperError::WriteOutput)
             .attach_printable("Serializing output payload")?;
 
@@ -170,11 +170,21 @@ where
     ERR: std::error::Error,
     OUTPUT: Debug + Serialize + Send + 'static,
 {
+    #[cfg(feature = "stats")]
+    let stats = smelter_worker::stats::track_system_stats();
+
     let config = aws_config::load_from_env().await;
     let worker = FargateWorker::from_env(aws_sdk_s3::Client::new(&config))?;
 
     let input = worker.initialize_without_payload();
-    let result = f(input).await;
+    let job_result = f(input).await;
+
+    let result = WorkerOutput {
+        result: job_result.into(),
+        #[cfg(feature = "stats")]
+        stats: stats.finish().await,
+    };
+
     worker.write_output(result).await?;
 
     Ok(())
@@ -189,6 +199,9 @@ where
     INPUT: Debug + DeserializeOwned + Send + 'static,
     OUTPUT: Debug + Serialize + Send + 'static,
 {
+    #[cfg(feature = "stats")]
+    let stats = smelter_worker::stats::track_system_stats();
+
     let config = aws_config::load_from_env().await;
     let worker = trace_result(
         "Initializing",
@@ -201,13 +214,24 @@ where
             let retryable = e.current_context().retryable();
             let error = WorkerError::from_error(retryable, e);
             worker
-                .write_output::<OUTPUT>(WorkerResult::Err(error))
+                .write_output::<OUTPUT>(WorkerOutput {
+                    result: WorkerResult::Err(error),
+                    #[cfg(feature = "stats")]
+                    stats: None,
+                })
                 .await?;
             return Ok(());
         }
     };
 
-    let result = trace_result("running worker", f(input).await);
+    let job_result = trace_result("running worker", f(input).await);
+
+    let result = WorkerOutput {
+        result: job_result.into(),
+        #[cfg(feature = "stats")]
+        stats: stats.finish().await,
+    };
+
     trace_result("writing output", worker.write_output(result).await)?;
 
     Ok(())

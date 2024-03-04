@@ -34,6 +34,8 @@ pub struct TaskDefWithOutput<DEF: SubTask> {
     pub task_def: DEF,
     /// The output of running the task.
     pub output: DEF::Output,
+    /// Statistics about the task execution.
+    pub stats: Option<smelter_worker::stats::Statistics>,
 }
 
 /// A definition of a subtask.

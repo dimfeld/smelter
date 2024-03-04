@@ -7,7 +7,7 @@ use ahash::HashMap;
 use async_trait::async_trait;
 use error_stack::{Report, ResultExt};
 use serde::Serialize;
-use smelter_worker::{WorkerError, WorkerResult};
+use smelter_worker::{WorkerError, WorkerOutput, WorkerResult};
 use tokio::{sync::oneshot, task::JoinHandle};
 
 use super::{SpawnedTask, TaskError};
@@ -106,6 +106,11 @@ impl SpawnedTask for InProcessSpawnedTask {
             Ok(Ok(r)) => WorkerResult::Ok(r),
             Ok(Err(e)) => WorkerResult::Err(WorkerError::from_error(e.retryable(), e)),
             Err(e) => WorkerResult::Err(WorkerError::from_error(true, e)),
+        };
+
+        let result = WorkerOutput {
+            result,
+            stats: None,
         };
 
         let result =
@@ -231,15 +236,15 @@ mod test {
         println!("output: {:?}", outputs);
         assert_eq!(
             outputs.get("00000000-0000-0000-0123-456789abcdef-000-00001-00"),
-            Some(&r##"{"type":"ok","data":"result 1"}"##.to_string())
+            Some(&r##"{"result":{"type":"ok","data":"result 1"},"stats":null}"##.to_string())
         );
         assert_eq!(
             outputs.get("00000000-0000-0000-0123-456789abcdef-000-00002-00"),
-            Some(&r##"{"type":"ok","data":"result 2"}"##.to_string())
+            Some(&r##"{"result":{"type":"ok","data":"result 2"},"stats":null}"##.to_string())
         );
         assert_eq!(
             outputs.get("00000000-0000-0000-0123-456789abcdef-000-00003-00"),
-            Some(&r##"{"type":"ok","data":"result 3"}"##.to_string())
+            Some(&r##"{"result":{"type":"ok","data":"result 3"},"stats":null}"##.to_string())
         );
     }
 }

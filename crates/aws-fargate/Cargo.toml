@@ -24,7 +24,8 @@ tracing = "0.1.40"
 url = "2.5.0"
 
 [features]
-default = ["worker", "spawner", "opentelemetry"]
+default = ["worker", "spawner", "stats", "opentelemetry"]
+stats = ["smelter-worker/stats"]
 spawner = ["dep:aws-sdk-ecs", "dep:aws-config", "dep:smelter-job-manager"]
 worker = ["dep:smelter-worker"]
 opentelemetry = ["smelter-worker/opentelemetry"]

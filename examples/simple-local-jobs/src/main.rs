@@ -10,8 +10,8 @@ use std::{borrow::Cow, sync::Arc};
 use clap::Parser;
 use error_stack::Report;
 use smelter_job_manager::{
-    Job, JobManager, LogSender, SchedulerBehavior, SpawnedTask, StatusSender, SubTask, SubtaskId,
-    TaskError,
+    Job, JobManager, LogSender, SchedulerBehavior, SpawnedTask, StatusSender,
+    StatusUpdateCustomFormatOptions, SubTask, SubtaskId, TaskError,
 };
 use smelter_local_jobs::spawner::LocalSpawner;
 use tokio::task::JoinSet;
@@ -60,10 +60,15 @@ async fn run_manager() {
         joins.spawn(run_job(i, job));
     }
 
+    let status_format = StatusUpdateCustomFormatOptions {
+        success: smelter_job_manager::Verbosity::Full,
+        ..Default::default()
+    };
+
     loop {
         tokio::select! {
             Ok(item) = status_rx.recv_async() => {
-                println!("{item}");
+                println!("{}", item.custom_format(&status_format))
             }
             join = joins.join_next() => {
                 if let Some(job) = join {

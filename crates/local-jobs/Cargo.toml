@@ -21,3 +21,6 @@ thiserror = "1.0.57"
 tempfile = "3.10.1"
 uuid = { version = "1.7.0", features = ["v7", "serde"] }
 
+[features]
+# Collect OS-level statistics about the tasks.
+stats = ["smelter-worker/stats"]

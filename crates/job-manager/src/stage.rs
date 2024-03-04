@@ -254,6 +254,7 @@ pub(crate) async fn run_tasks_stage<SUBTASK: SubTask>(
                                 let output = TaskDefWithOutput {
                                     task_def: task_info.input,
                                     output: output.output,
+                                    stats: output.stats,
                                 };
                                 subtask_result_tx.send_async(Ok(output)).await.ok();
 

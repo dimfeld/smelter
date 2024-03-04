@@ -6,7 +6,7 @@
 use std::{fmt::Debug, path::PathBuf};
 
 use error_stack::{Report, ResultExt};
-use smelter_worker::{WorkerInput, WorkerResult, WrapperError};
+use smelter_worker::{WorkerInput, WorkerOutput, WorkerResult, WrapperError};
 
 pub mod spawner;
 
@@ -61,19 +61,18 @@ impl LocalWorkerInfo {
     /// sense for your task.
     pub async fn write_output<DATA: Debug>(
         &self,
-        result: impl Into<WorkerResult<DATA>>,
+        output: WorkerOutput<DATA>,
     ) -> Result<(), Report<WrapperError>>
     where
         DATA: serde::Serialize + Send + 'static,
     {
-        let result = result.into();
-        let output = self.output.clone();
+        let output_path = self.output.clone();
         tokio::task::spawn_blocking(move || {
-            let file = std::fs::File::create(&output)
+            let file = std::fs::File::create(&output_path)
                 .change_context(WrapperError::WriteOutput)
-                .attach_printable_lazy(|| output.display().to_string())?;
+                .attach_printable_lazy(|| output_path.display().to_string())?;
             let mut file = std::io::BufWriter::new(file);
-            serde_json::to_writer(&mut file, &result).change_context(WrapperError::WriteOutput)
+            serde_json::to_writer(&mut file, &output).change_context(WrapperError::WriteOutput)
         })
         .await
         .change_context(WrapperError::WriteOutput)?

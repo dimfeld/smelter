@@ -12,6 +12,7 @@ pub struct StatusUpdateSpawnedData {
 #[derive(Debug, Clone)]
 pub struct StatusUpdateSuccessData {
     pub output: Vec<u8>,
+    pub stats: Option<smelter_worker::stats::Statistics>,
 }
 
 #[derive(Debug, Clone)]
@@ -25,11 +26,14 @@ pub enum StatusUpdateData {
 }
 
 impl StatusUpdateData {
-    pub fn custom_format(
-        &self,
-        format: StatusUpdateCustomFormatOptions,
+    pub fn custom_format<'a>(
+        &'a self,
+        format: &'a StatusUpdateCustomFormatOptions,
     ) -> StatusUpdateDataDisplayCustom {
-        StatusUpdateDataDisplayCustom { format, data: self }
+        StatusUpdateDataDisplayCustom {
+            format: &format,
+            data: self,
+        }
     }
 }
 
@@ -72,7 +76,7 @@ pub struct StatusUpdateCustomFormatOptions {
 }
 
 pub struct StatusUpdateDataDisplayCustom<'a> {
-    pub format: StatusUpdateCustomFormatOptions,
+    pub format: &'a StatusUpdateCustomFormatOptions,
     pub data: &'a StatusUpdateData,
 }
 
@@ -106,7 +110,13 @@ impl Display for StatusUpdateDataDisplayCustom<'_> {
             StatusUpdateData::Success(data) => match self.format.success {
                 Verbosity::Short => write!(f, "Success"),
                 Verbosity::Standard => write!(f, "Success"),
-                Verbosity::Full => write!(f, "Success: {}", String::from_utf8_lossy(&data.output)),
+                Verbosity::Full => {
+                    write!(f, "Success: {}", String::from_utf8_lossy(&data.output))?;
+                    if let Some(stats) = &data.stats {
+                        write!(f, " ({stats:?})")?;
+                    }
+                    Ok(())
+                }
             },
         }
     }
@@ -119,20 +129,52 @@ pub struct StatusUpdateItem {
     pub data: StatusUpdateData,
 }
 
-impl Display for StatusUpdateItem {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+impl StatusUpdateItem {
+    pub fn custom_format<'a>(
+        &'a self,
+        format: &'a StatusUpdateCustomFormatOptions,
+    ) -> StatusUpdateItemCustomFormat {
+        StatusUpdateItemCustomFormat { format, item: self }
+    }
+}
+
+impl StatusUpdateItem {
+    pub fn write_header(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         let time = self.timestamp.time();
         write!(
             f,
-            "{date} {hour:02}:{minute:02}:{second:02}.{ms:03} {task_id}: {data}",
+            "{date} {hour:02}:{minute:02}:{second:02}.{ms:03} {task_id}: ",
             date = self.timestamp.date(),
             hour = time.hour(),
             minute = time.minute(),
             second = time.second(),
             ms = time.millisecond(),
             task_id = self.task_id,
-            data = self.data
         )
+    }
+}
+
+impl Display for StatusUpdateItem {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        self.write_header(f)?;
+        write!(f, "{}", self.data)
+    }
+}
+
+pub struct StatusUpdateItemCustomFormat<'a> {
+    format: &'a StatusUpdateCustomFormatOptions,
+    item: &'a StatusUpdateItem,
+}
+
+impl<'a> Display for StatusUpdateItemCustomFormat<'a> {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        self.item.write_header(f)?;
+
+        let data_format = StatusUpdateDataDisplayCustom {
+            format: self.format,
+            data: &self.item.data,
+        };
+        write!(f, "{data_format}")
     }
 }
 

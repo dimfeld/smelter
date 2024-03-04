@@ -6,6 +6,9 @@ use serde::{de::DeserializeOwned, Deserialize, Serialize};
 use thiserror::Error;
 use uuid::Uuid;
 
+#[cfg(feature = "stats")]
+pub mod stats;
+
 /// The ID for a subtask, which uniquely identifies it within a [Job].
 #[derive(Debug, Copy, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
 pub struct SubtaskId {
@@ -135,10 +138,42 @@ impl<E: std::error::Error> From<E> for WorkerError {
 #[cfg_attr(feature = "worker-side", derive(Serialize))]
 #[cfg_attr(feature = "spawner-side", derive(Deserialize))]
 #[derive(Debug)]
+pub struct WorkerOutput<T: Debug> {
+    pub result: WorkerResult<T>,
+    #[cfg(feature = "stats")]
+    pub stats: Option<crate::stats::Statistics>,
+}
+
+#[cfg(feature = "spawner-side")]
+impl<T: Debug + DeserializeOwned> WorkerOutput<T> {
+    pub fn from_output_payload(data: &[u8]) -> WorkerOutput<T> {
+        match serde_json::from_slice::<WorkerOutput<T>>(data) {
+            Ok(output) => output,
+            Err(e) => WorkerOutput {
+                result: WorkerResult::Err(WorkerError::from_error(false, e)),
+                #[cfg(feature = "stats")]
+                stats: None,
+            },
+        }
+    }
+}
+
+#[cfg_attr(feature = "worker-side", derive(Serialize))]
+#[cfg_attr(feature = "spawner-side", derive(Deserialize))]
+#[derive(Debug)]
 #[serde(tag = "type", content = "data", rename_all = "snake_case")]
 pub enum WorkerResult<T: Debug> {
     Ok(T),
     Err(WorkerError),
+}
+
+impl<T: Debug> WorkerResult<T> {
+    pub fn into_result(self) -> Result<T, WorkerError> {
+        match self {
+            WorkerResult::Ok(r) => Ok(r),
+            WorkerResult::Err(e) => Err(e),
+        }
+    }
 }
 
 impl<T: Debug, E: std::error::Error> From<Result<T, E>> for WorkerResult<T> {
@@ -155,17 +190,6 @@ impl<T: Debug> From<WorkerResult<T>> for Result<T, WorkerError> {
         match r {
             WorkerResult::Ok(r) => Ok(r),
             WorkerResult::Err(e) => Err(e),
-        }
-    }
-}
-
-#[cfg(feature = "spawner-side")]
-impl<T: Debug + DeserializeOwned> WorkerResult<T> {
-    pub fn parse(data: &[u8]) -> Result<T, WorkerError> {
-        match serde_json::from_slice::<WorkerResult<T>>(data) {
-            Ok(WorkerResult::Ok(r)) => Ok(r),
-            Ok(WorkerResult::Err(e)) => Err(e),
-            Err(e) => Err(WorkerError::from_error(false, e)),
         }
     }
 }

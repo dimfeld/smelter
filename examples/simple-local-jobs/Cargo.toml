@@ -16,5 +16,5 @@ rand = "0.8.5"
 ratatui = "0.26.1"
 smelter-job-manager = { path = "../../crates/job-manager" }
 smelter-local-jobs = { path = "../../crates/local-jobs" }
-smelter-worker = { path = "../../crates/worker" }
+smelter-worker = { path = "../../crates/worker", features = ["stats"] }
 tokio = "1.36.0"

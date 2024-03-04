@@ -1,7 +1,7 @@
 use std::sync::Arc;
 
 use error_stack::{Report, ResultExt};
-use smelter_worker::WorkerResult;
+use smelter_worker::{stats::Statistics, WorkerOutput};
 use tokio::sync::Semaphore;
 use tracing::{instrument, Level};
 
@@ -17,6 +17,7 @@ pub(super) type SubtaskResult<T> = Result<SubtaskOutput<T>, Report<TaskError>>;
 #[derive(Debug)]
 pub struct SubtaskOutput<T> {
     pub output: T,
+    pub stats: Option<Statistics>,
 }
 
 pub(crate) struct SubtaskPayload<SUBTASK: SubTask> {
@@ -88,17 +89,19 @@ async fn run_subtask_internal<SUBTASK: SubTask>(
         res = task.wait() => {
             let res = res.attach_printable_lazy(|| format!("Job {task_id} Runtime ID {runtime_id}"))?;
 
-            let output = WorkerResult::parse(&res)
+            let WorkerOutput { result, stats } = WorkerOutput::from_output_payload(&res);
+            let output = result.into_result()
                 .map_err(|e| Report::new(SerializedWorkerFailure(e.error)).change_context(TaskError::failed(task_id, e.retryable)))
                 .attach_printable_lazy(|| format!("Job {task_id} Runtime ID {runtime_id}"))?;
 
             status_sender.add(task_id, StatusUpdateData::Success(
                     StatusUpdateSuccessData {
                         output: res.clone(),
+                        stats: stats.clone(),
                     }
                 ));
 
-            Ok(SubtaskOutput { output })
+            Ok(SubtaskOutput { output, stats })
         }
 
         _ = cancel.changed() => {
