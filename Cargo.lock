@@ -2515,6 +2515,7 @@ dependencies = [
  "aws-config",
  "aws-sdk-ecs",
  "aws-sdk-s3",
+ "aws-smithy-runtime-api",
  "error-stack",
  "eyre",
  "futures",

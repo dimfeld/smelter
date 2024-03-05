@@ -4,10 +4,13 @@
 
 use thiserror::Error;
 
+pub mod client;
 #[cfg(feature = "spawner")]
 pub mod spawner;
 #[cfg(feature = "worker")]
 pub mod worker;
+
+pub use client::build_ecs_client_config;
 
 const INPUT_LOCATION_VAR: &str = "SMELTER_INPUT_LOCATION";
 const OUTPUT_LOCATION_VAR: &str = "SMELTER_OUTPUT_LOCATION";

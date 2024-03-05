@@ -9,6 +9,7 @@ use aws_sdk_ecs::types::{
 };
 use aws_sdk_s3::primitives::ByteStream;
 use error_stack::{Report, ResultExt};
+use futures::Future;
 use serde::Serialize;
 use smelter_job_manager::{SpawnedTask, SubtaskId, TaskError, TaskErrorKind};
 use smelter_worker::get_trace_context;
