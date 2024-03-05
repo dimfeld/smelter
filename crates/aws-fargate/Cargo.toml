@@ -2,6 +2,11 @@
 name = "smelter-aws-fargate"
 version = "0.1.0"
 edition = "2021"
+description = "AWS Fargate execution adapter for the Smelter job orchestration framework"
+license = "Apache-2.0 OR MIT"
+repository = "https://github.com/dimfeld/smelter"
+homepage = "https://github.com/dimfeld/smelter"
+documentation = "https://docs.rs/smelter-aws-fargate"
 
 # See more keys and their definitions at https://doc.rust-lang.org/cargo/reference/manifest.html
 
@@ -17,8 +22,8 @@ futures = "0.3.30"
 rand = "0.8.5"
 serde = "1.0.197"
 serde_json = "1.0.114"
-smelter-job-manager = { path = "../job-manager", optional = true }
-smelter-worker = { path = "../worker", optional = true }
+smelter-job-manager = { path = "../job-manager", version = "0.1.0", optional = true }
+smelter-worker = { path = "../worker", version = "0.1.0", optional = true }
 thiserror = "1.0.57"
 tokio = { version = "1.36.0", features = ["time"] }
 tracing = "0.1.40"
