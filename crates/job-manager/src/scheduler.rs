@@ -1,5 +1,5 @@
 /// Customization for the behavior of the job scheduler
-#[derive(Debug, Default, Clone)]
+#[derive(Debug, Clone)]
 pub struct SchedulerBehavior {
     /// The maximum number of tasks to run at once in a job. Leave this as `None` to run
     /// them as fast as possible, leaving the limits to the underlying task runtime.
@@ -11,6 +11,16 @@ pub struct SchedulerBehavior {
     /// When to eagerly retry the remaining tasks in a job stage. For certain task hosts, such as AWS
     /// Lambda, this can sometimes greatly reduce tail latency.
     pub slow_task_behavior: SlowTaskBehavior,
+}
+
+impl Default for SchedulerBehavior {
+    fn default() -> Self {
+        Self {
+            max_concurrent_tasks: Default::default(),
+            max_retries: 2,
+            slow_task_behavior: Default::default(),
+        }
+    }
 }
 
 /// When to rerun tasks that may be stalled.

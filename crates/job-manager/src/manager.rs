@@ -14,27 +14,42 @@ pub struct JobManager {
     pub(crate) status_sender: StatusSender,
     cancel_tx: tokio::sync::watch::Sender<()>,
     pub(crate) cancel_rx: tokio::sync::watch::Receiver<()>,
+    pub(crate) cancel_timeout: std::time::Duration,
 }
 
 impl JobManager {
     /// Create a new [JobManager]
     /// * scheduler - How subtasks should be scheduled within a job
     /// * status_collector - A collector of job and subtask status information.
-    /// * global_semaphore - If supplied, the `global_semaphore` will limit the number of tasks that are running
-    ///   concurrently, across all jobs.
-    pub fn new(
-        scheduler: SchedulerBehavior,
-        status_sender: StatusSender,
-        global_semaphore: Option<Arc<Semaphore>>,
-    ) -> Self {
+    pub fn new(status_sender: StatusSender) -> Self {
         let (cancel_tx, cancel_rx) = tokio::sync::watch::channel(());
         Self {
-            scheduler,
+            scheduler: SchedulerBehavior::default(),
             status_sender,
-            global_semaphore,
+            global_semaphore: None,
             cancel_tx,
             cancel_rx,
+            cancel_timeout: std::time::Duration::from_secs(86400),
         }
+    }
+
+    /// Add a global semaphore to this job manager, to limit the number of jobs run across all
+    /// jobs.
+    pub fn with_global_semaphore(mut self, global_semaphore: Arc<Semaphore>) -> Self {
+        self.global_semaphore = Some(global_semaphore);
+        self
+    }
+
+    /// Alter the scheduler behavior for the job manager
+    pub fn with_scheduler_behavior(mut self, scheduler: SchedulerBehavior) -> Self {
+        self.scheduler = scheduler;
+        self
+    }
+
+    /// Set how long to wait for tasks to cancel when an error occurs.
+    pub fn with_cancel_timeout(mut self, cancel_timeout: std::time::Duration) -> Self {
+        self.cancel_timeout = cancel_timeout;
+        self
     }
 
     /// Create a new job with custom scheduler behavior.

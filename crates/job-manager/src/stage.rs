@@ -1,4 +1,4 @@
-use std::{fmt::Debug, sync::Arc};
+use std::{cell::OnceCell, fmt::Debug, sync::Arc};
 
 use ahash::HashMap;
 use error_stack::Report;
@@ -11,8 +11,8 @@ use uuid::Uuid;
 use crate::{
     run_subtask::{run_subtask, SubtaskPayload, SubtaskSyncs},
     spawn::TaskError,
-    SchedulerBehavior, SlowTaskBehavior, StatusSender, StatusUpdateData, SubTask, SubtaskId,
-    TaskDefWithOutput, TaskErrorKind,
+    CancelState, SchedulerBehavior, SlowTaskBehavior, StatusSender, StatusUpdateData, SubTask,
+    SubtaskId, TaskDefWithOutput, TaskErrorKind,
 };
 
 /// Information to run a task as well as which retry we're on.
@@ -115,12 +115,13 @@ fn ready_for_tail_retry(
     }
 }
 
-pub(crate) struct StageArgs<SUBTASK: SubTask> {
+pub(crate) struct StageRunner<SUBTASK: SubTask> {
     pub job_id: Uuid,
     pub stage_index: usize,
     pub parent_span: Span,
     pub new_task_rx: Receiver<SUBTASK>,
-    pub cancel_rx: tokio::sync::watch::Receiver<()>,
+    pub cancel_rx: tokio::sync::watch::Receiver<CancelState>,
+    pub job_cancel_tx: Arc<tokio::sync::Notify>,
     pub subtask_result_tx: Sender<Result<TaskDefWithOutput<SUBTASK>, Report<TaskError>>>,
     pub scheduler: SchedulerBehavior,
     pub status_sender: StatusSender,
@@ -128,234 +129,277 @@ pub(crate) struct StageArgs<SUBTASK: SubTask> {
     pub global_semaphore: Option<Arc<Semaphore>>,
 }
 
-#[instrument(
-    level = Level::DEBUG,
-    parent = &args.parent_span,
-    fields(
-        stage_index = %args.stage_index
-    ),
-    skip(args)
-)]
-pub(crate) async fn run_tasks_stage<SUBTASK: SubTask>(
-    args: StageArgs<SUBTASK>,
-) -> Result<(), Report<TaskError>> {
-    let StageArgs {
-        job_id: job,
-        stage_index,
-        new_task_rx,
-        cancel_rx: mut job_cancel_rx,
-        subtask_result_tx,
-        scheduler,
-        status_sender,
-        job_semaphore,
-        global_semaphore,
-        ..
-    } = args;
+impl<SUBTASK: SubTask> StageRunner<SUBTASK> {
+    #[instrument(
+        level = Level::DEBUG,
+        parent = &self.parent_span,
+        fields(
+            stage_index = %self.stage_index
+        ),
+        skip(self)
+    )]
+    pub(crate) async fn run(mut self) -> Result<(), Report<TaskError>> {
+        event!(Level::DEBUG, "Adding stage {}", self.stage_index);
+        let job = self.job_id;
+        let mut total_num_tasks = 0;
+        let mut unfinished = HashMap::default();
 
-    event!(Level::DEBUG, "Adding stage {}", stage_index);
-    let mut total_num_tasks = 0;
-    let mut unfinished = HashMap::default();
+        // We never transmit anything on cancel_tx, but let it drop at the end of the function to
+        // cancel any tasks still running.
+        let (tasks_cancel_tx, tasks_cancel_rx) = tokio::sync::watch::channel(());
 
-    // We never transmit anything on cancel_tx, but let it drop at the end of the function to
-    // cancel any tasks still running.
-    let (_cancel_tx, cancel_rx) = tokio::sync::watch::channel(());
+        let syncs = Arc::new(SubtaskSyncs {
+            job_semaphore: self.job_semaphore.clone(),
+            global_semaphore: self.global_semaphore.clone(),
+            cancel: tasks_cancel_rx,
+        });
 
-    let syncs = Arc::new(SubtaskSyncs {
-        job_semaphore: job_semaphore.clone(),
-        global_semaphore: global_semaphore.clone(),
-        cancel: cancel_rx,
-    });
+        let mut running_tasks = FuturesUnordered::new();
+        // using a closure here since it lets us omit the type parameter in FuturesUnordered,
+        // which is difficult to express.
+        let spawn_task =
+            |i: usize, try_num: u16, task: SUBTASK, futures: &mut FuturesUnordered<_>| {
+                let task_id = SubtaskId {
+                    job,
+                    stage: self.stage_index as u16,
+                    task: i as u32,
+                    try_num,
+                };
 
-    let mut running_tasks = FuturesUnordered::new();
-    let spawn_task = |i: usize, try_num: u16, task: SUBTASK, futures: &mut FuturesUnordered<_>| {
-        let task_id = SubtaskId {
-            job,
-            stage: stage_index as u16,
-            task: i as u32,
-            try_num,
-        };
+                let payload = SubtaskPayload {
+                    input: task,
+                    task_id,
+                    status_sender: self.status_sender.clone(),
+                };
 
-        let payload = SubtaskPayload {
-            input: task,
-            task_id,
-            status_sender: status_sender.clone(),
-        };
+                let current_span = tracing::Span::current();
+                let new_task =
+                    tokio::task::spawn(run_subtask(current_span, syncs.clone(), payload))
+                        .map(move |join_handle| (i, join_handle));
+                futures.push(new_task);
+            };
 
-        let current_span = tracing::Span::current();
-        let new_task = tokio::task::spawn(run_subtask(current_span, syncs.clone(), payload))
-            .map(move |join_handle| (i, join_handle));
-        futures.push(new_task);
-    };
+        let mut performed_tail_retry = false;
+        let mut no_more_new_tasks = false;
 
-    let mut performed_tail_retry = false;
-    let mut no_more_new_tasks = false;
+        let retry_or_fail =
+            |futures: &mut FuturesUnordered<_>,
+             e: Report<TaskError>,
+             task_index: usize,
+             task_info: &mut TaskTrackingInfo<SUBTASK>| {
+                let task_id = SubtaskId {
+                    job,
+                    stage: self.stage_index as u16,
+                    task: task_index as u32,
+                    try_num: task_info.try_num as u16,
+                };
 
-    let retry_or_fail = |futures: &mut FuturesUnordered<_>,
-                         e: Report<TaskError>,
-                         task_index: usize,
-                         task_info: &mut TaskTrackingInfo<SUBTASK>| {
-        let task_id = SubtaskId {
-            job,
-            stage: stage_index as u16,
-            task: task_index as u32,
-            try_num: task_info.try_num as u16,
-        };
+                if e.current_context().retryable() && task_info.try_num < self.scheduler.max_retries
+                {
+                    self.status_sender.add(
+                        task_id,
+                        StatusUpdateData::Retry(e.current_context().kind.clone(), format!("{e:?}")),
+                    );
+                    task_info.try_num += 1;
+                    spawn_task(
+                        task_index,
+                        task_info.try_num as u16,
+                        task_info.input.clone(),
+                        futures,
+                    );
+                    Ok(())
+                } else {
+                    self.status_sender.add(
+                        task_id,
+                        StatusUpdateData::Failed(
+                            e.current_context().kind.clone(),
+                            format!("{e:?}"),
+                        ),
+                    );
+                    Err(e)
+                }
+            };
 
-        if e.current_context().retryable() && task_info.try_num < scheduler.max_retries {
-            status_sender.add(
-                task_id,
-                StatusUpdateData::Retry(e.current_context().kind.clone(), format!("{e:?}")),
-            );
-            task_info.try_num += 1;
-            spawn_task(
-                task_index,
-                task_info.try_num as u16,
-                task_info.input.clone(),
-                futures,
-            );
-            Ok(())
-        } else {
-            status_sender.add(
-                task_id,
-                StatusUpdateData::Failed(e.current_context().kind.clone(), format!("{e:?}")),
-            );
-            Err(e)
-        }
-    };
+        let retval = OnceCell::new();
+        let mut cancelling = false;
 
-    while !unfinished.is_empty() || !no_more_new_tasks {
-        tokio::select! {
-            new_task = new_task_rx.recv_async(), if !no_more_new_tasks => {
-                match new_task {
-                    Ok(new_task) => {
-                        event!(Level::DEBUG, %stage_index, ?new_task, "received task");
-                        unfinished.insert(total_num_tasks, TaskTrackingInfo{
-                            try_num: 0,
-                            input: new_task.clone(),
-                        });
-                        spawn_task(total_num_tasks, 0, new_task, &mut running_tasks);
-                        total_num_tasks += 1;
-                    }
-                    Err(_) => {
-                        event!(Level::DEBUG, %stage_index, "tasks finished");
-                        no_more_new_tasks = true;
+        while !unfinished.is_empty() || !no_more_new_tasks {
+            tokio::select! {
+
+                new_task = self.new_task_rx.recv_async(), if !no_more_new_tasks => {
+                    match new_task {
+                        Ok(new_task) => {
+                            event!(Level::DEBUG, %self.stage_index, ?new_task, "received task");
+                            unfinished.insert(total_num_tasks, TaskTrackingInfo{
+                                try_num: 0,
+                                input: new_task.clone(),
+                            });
+                            spawn_task(total_num_tasks, 0, new_task, &mut running_tasks);
+                            total_num_tasks += 1;
+                        }
+                        Err(_) => {
+                            event!(Level::DEBUG, %self.stage_index, "tasks finished");
+                            no_more_new_tasks = true;
+                        }
                     }
                 }
-            }
 
-            task = running_tasks.next(), if !running_tasks.is_empty()  => {
-                if let Some((task_index, result)) = task {
-                    match result {
-                        Ok(None) => {
-                            // The semaphore closed so the task did not run. This means that the whole
-                            // job or system is shutting down, so don't worry about it here.
+                task = running_tasks.next(), if !running_tasks.is_empty()  => {
+                    if let Some((task_index, result)) = task {
+                        if cancelling {
+                            event!(Level::DEBUG, "Ignoring finished task due to cancel");
+                            unfinished.remove(&task_index);
+                            continue;
                         }
-                        Ok(Some(Ok(output))) => {
-                            if let Some(task_info) = unfinished.remove(&task_index) {
-                                let output = TaskDefWithOutput {
-                                    task_def: task_info.input,
-                                    output: output.output,
-                                    stats: output.stats,
-                                };
-                                subtask_result_tx.send_async(Ok(output)).await.ok();
 
-                                if !performed_tail_retry && no_more_new_tasks
-                                    && ready_for_tail_retry(&scheduler, unfinished.len(), total_num_tasks)
-                                {
-                                    event!(Level::INFO, "starting tail retry");
-                                    performed_tail_retry = true;
+                        match result {
+                            Ok(None) => {
+                                // The semaphore closed so the task did not run. This means that the whole
+                                // job or system is shutting down, so don't worry about it here.
+                            }
+                            Ok(Some(Ok(output))) => {
+                                if let Some(task_info) = unfinished.remove(&task_index) {
+                                    let output = TaskDefWithOutput {
+                                        task_def: task_info.input,
+                                        output: output.output,
+                                        stats: output.stats,
+                                    };
+                                    self.subtask_result_tx.send_async(Ok(output)).await.ok();
 
-                                    // Re-enqueue all unfinished tasks. Some serverless platforms
-                                    // can have very high tail latency, so this gets around that issue.
-                                    for (i, task) in unfinished.iter_mut() {
-                                        let id = SubtaskId {
-                                                job,
-                                                stage: stage_index as u16,
-                                                task: *i as u32,
-                                                try_num: task.try_num as u16,
-                                            };
-                                        status_sender.add(
-                                            id,
-                                            StatusUpdateData::Retry(
-                                                TaskErrorKind::TailRetry,
-                                                format!("{:?}", Report::new(TaskError::tail_retry(id))),
-                                            ),
-                                        );
+                                    if !performed_tail_retry && no_more_new_tasks && !cancelling
+                                        && ready_for_tail_retry(&self.scheduler, unfinished.len(), total_num_tasks)
+                                    {
+                                        event!(Level::INFO, "starting tail retry");
+                                        performed_tail_retry = true;
 
-                                        task.try_num += 1;
-                                        spawn_task(*i, task.try_num as u16, task.input.clone(), &mut running_tasks);
+                                        // Re-enqueue all unfinished tasks. Some serverless platforms
+                                        // can have very high tail latency, so this gets around that issue.
+                                        for (i, task) in unfinished.iter_mut() {
+                                            let id = SubtaskId {
+                                                    job,
+                                                    stage: self.stage_index as u16,
+                                                    task: *i as u32,
+                                                    try_num: task.try_num as u16,
+                                                };
+                                            self.status_sender.add(
+                                                id,
+                                                StatusUpdateData::Retry(
+                                                    TaskErrorKind::TailRetry,
+                                                    format!("{:?}", Report::new(TaskError::tail_retry(id))),
+                                                ),
+                                            );
+
+                                            task.try_num += 1;
+                                            spawn_task(*i, task.try_num as u16, task.input.clone(), &mut running_tasks);
+                                        }
                                     }
                                 }
                             }
-                        }
-                        // Task finished with an error.
-                        Ok(Some(Err(e))) => {
-                            if let Some(task_info) = unfinished.get_mut(&task_index) {
-                                if let Err(e) = retry_or_fail(&mut running_tasks, e, task_index, task_info) {
-                                    let retryable = e.current_context().retryable();
-                                    subtask_result_tx.send_async(Err(e)).await.ok();
+                            // Task finished with an error.
+                            Ok(Some(Err(e))) => {
+                                if let Some(task_info) = unfinished.get_mut(&task_index) {
+                                    if let Err(e) = retry_or_fail(&mut running_tasks, e, task_index, task_info) {
+                                        let retryable = e.current_context().retryable();
+                                        self.job_cancel_tx.notify_one();
+                                        self.subtask_result_tx.send_async(Err(e)).await.ok();
+                                        cancelling = true;
 
+                                        let id = SubtaskId {
+                                            job,
+                                            stage: self.stage_index as u16,
+                                            task: task_index as u32,
+                                            try_num: task_info.try_num as u16,
+                                        };
+                                        retval.set(Report::new(TaskError::failed(id, retryable))).ok();
+                                    }
+                                }
+
+                                if cancelling {
+                                    unfinished.remove(&task_index);
+                                }
+                            }
+                            // Task panicked. We can't really decipher the error so always consider it
+                            // retryable.
+                            Err(e) => {
+                                if let Some(task_info) = unfinished.get_mut(&task_index) {
                                     let id = SubtaskId {
                                         job,
-                                        stage: stage_index as u16,
+                                        stage: self.stage_index as u16,
                                         task: task_index as u32,
                                         try_num: task_info.try_num as u16,
                                     };
-                                    return Err(Report::new(TaskError::failed(id, retryable)));
+                                    let e = Report::new(e).change_context(TaskError::failed(id, true));
+                                    if let Err(e) = retry_or_fail(&mut running_tasks, e, task_index, task_info) {
+                                        self.job_cancel_tx.notify_one();
+                                        self.subtask_result_tx.send_async(Err(e)).await.ok();
+                                        cancelling = true;
+                                        retval.set(Report::new(TaskError::failed(id, true))).ok();
+                                    }
                                 }
-                            }
-                        }
-                        // Task panicked. We can't really decipher the error so always consider it
-                        // retryable.
-                        Err(e) => {
-                            if let Some(task_info) = unfinished.get_mut(&task_index) {
-                                let id = SubtaskId {
-                                    job,
-                                    stage: stage_index as u16,
-                                    task: task_index as u32,
-                                    try_num: task_info.try_num as u16,
-                                };
-                                let e = Report::new(e).change_context(TaskError::failed(id, true));
-                                if let Err(e) = retry_or_fail(&mut running_tasks, e, task_index, task_info) {
-                                    subtask_result_tx.send_async(Err(e)).await.ok();
-                                    return Err(Report::new(TaskError::failed(id, true)));
+
+                                if cancelling {
+                                    unfinished.remove(&task_index);
                                 }
                             }
                         }
                     }
                 }
+
+                changed = self.cancel_rx.changed() => {
+                    if changed.is_err() {
+                        // Everything has closed down, so there's no point in waiting for the jobs
+                        // to finish cancelling.
+                        event!(Level::DEBUG, "Cancel channel closed");
+                        break;
+                    }
+
+                    let cancel_status = self.cancel_rx.borrow_and_update().clone();
+                    match cancel_status {
+                        CancelState::Idle => {}
+                        CancelState::Started => {
+                            // Start cancelling
+                            event!(Level::DEBUG, "job cancelling");
+                            self.job_semaphore.close();
+                            tasks_cancel_tx.send(()).ok();
+                            cancelling = true;
+                            no_more_new_tasks = true;
+                        }
+                        CancelState::Finished => {
+                            // We timed out.
+                            event!(Level::DEBUG, "job cancelled");
+                            if let Some((task_index, info)) = unfinished.iter().next() {
+                                // Send a cancellation error on one of the unfinished tasks, if there is one,
+                                // so that anyone handling the stage results will see the error there.
+                                let id = SubtaskId {
+                                    job,
+                                    stage: self.stage_index as u16,
+                                    task: *task_index as u32,
+                                    try_num: info.try_num as u16,
+                                };
+
+                                self.subtask_result_tx.send_async(
+                                    Err(Report::new(TaskError::cancelled(id)))
+                                ).await.ok();
+                            }
+
+                            break;
+                        }
+                    }
+                }
             }
 
-            _ = job_cancel_rx.changed() => {
-                if let Some((task_index, info)) = unfinished.iter().next() {
-                    // Send a cancellation error on one of the unfinished tasks, if there is one,
-                    // so that anyone handling the stage results will see the error there.
-                    let id = SubtaskId {
-                        job,
-                        stage: stage_index as u16,
-                        task: *task_index as u32,
-                        try_num: info.try_num as u16,
-                    };
-
-                    subtask_result_tx.send_async(
-                        Err(Report::new(TaskError::cancelled(id)))
-                    ).await.ok();
-                }
-                event!(Level::DEBUG, "job cancelled");
+            if self
+                .global_semaphore
+                .as_ref()
+                .map(|s| s.is_closed())
+                .unwrap_or_default()
+            {
+                // The system is shutting down.
+                event!(Level::DEBUG, "global semaphore closed");
                 break;
             }
         }
 
-        if global_semaphore
-            .as_ref()
-            .map(|s| s.is_closed())
-            .unwrap_or_default()
-        {
-            // The system is shutting down.
-            event!(Level::DEBUG, "global semaphore closed");
-            break;
-        }
+        retval.into_inner().map(|e| Err(e)).unwrap_or(Ok(()))
     }
-
-    Ok(())
 }

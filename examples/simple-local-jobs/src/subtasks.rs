@@ -1,8 +1,8 @@
 use rand::Rng;
 use smelter_local_jobs::LocalWorkerInfo;
-use smelter_worker::{WorkerOutput, WorkerResult};
+use smelter_worker::{WorkerError, WorkerOutput, WorkerResult};
 
-pub async fn generate_random() {
+pub async fn generate_random(fail: bool) {
     let stats = smelter_worker::stats::track_system_stats();
     println!("generate-random starting...");
     let info = LocalWorkerInfo::from_env().unwrap();
@@ -12,8 +12,13 @@ pub async fn generate_random() {
 
     let value: u32 = rand::thread_rng().gen_range(1..10);
 
+    let result = match fail {
+        true => WorkerResult::Err(WorkerError::from_error(false, "Test failure")),
+        false => WorkerResult::Ok(value.to_string()),
+    };
+
     let output = WorkerOutput {
-        result: WorkerResult::Ok(value.to_string()),
+        result,
         stats: stats.finish().await,
     };
 
