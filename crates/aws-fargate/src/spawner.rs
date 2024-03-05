@@ -10,7 +10,7 @@ use aws_sdk_ecs::types::{
 use aws_sdk_s3::primitives::ByteStream;
 use error_stack::{Report, ResultExt};
 use serde::Serialize;
-use smelter_job_manager::{SpawnedTask, SubtaskId, TaskError};
+use smelter_job_manager::{SpawnedTask, SubtaskId, TaskError, TaskErrorKind};
 use smelter_worker::get_trace_context;
 
 use crate::{AwsError, INPUT_LOCATION_VAR, OTEL_CONTEXT_VAR, OUTPUT_LOCATION_VAR, SUBTASK_ID_VAR};
@@ -348,8 +348,7 @@ impl SpawnedFargateContainer {
 
             if let Some(timeout) = timeout {
                 if start_time.elapsed() > timeout {
-                    return Err(Report::new(TaskError::did_not_start(self.task_id, true))
-                        .attach_printable("Timed out waiting for task to start"));
+                    return Err(Report::new(TaskError::timed_out(self.task_id)));
                 }
             }
         }
@@ -426,13 +425,20 @@ impl SpawnedFargateContainer {
 
     async fn wait_for_task(&self) -> Result<(), Report<TaskError>> {
         // First wait for the container to start so we can fail fast if things totally break
-        self.wait_for_status(
-            tokio::time::Instant::now(),
-            Duration::from_secs(10),
-            Some(self.start_timeout),
-            TaskStatus::Started,
-        )
-        .await?;
+        let result = self
+            .wait_for_status(
+                tokio::time::Instant::now(),
+                Duration::from_secs(10),
+                Some(self.start_timeout),
+                TaskStatus::Started,
+            )
+            .await;
+
+        if let Err(err) = result {
+            if matches!(err.current_context().kind, TaskErrorKind::TimedOut) {
+                return Err(Report::new(TaskError::did_not_start(self.task_id, true)));
+            }
+        }
 
         // Then do a few checks at a quick duration to see if the task didn't fail shortly after
         // starting.
