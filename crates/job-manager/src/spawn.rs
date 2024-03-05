@@ -120,7 +120,7 @@ pub enum TaskErrorKind {
     #[error("Cancelled")]
     Cancelled,
     /// The task failed.
-    #[error("Encountered an error")]
+    #[error("Task failed")]
     Failed(bool),
     /// The setup for the task failed.
     #[error("Failed to generate a subtask")]

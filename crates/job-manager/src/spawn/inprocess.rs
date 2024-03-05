@@ -9,6 +9,7 @@ use error_stack::{Report, ResultExt};
 use serde::Serialize;
 use smelter_worker::{WorkerError, WorkerOutput, WorkerResult};
 use tokio::{sync::oneshot, task::JoinHandle};
+use tracing::{event, Level};
 
 use super::{SpawnedTask, TaskError};
 #[cfg(test)]
@@ -89,6 +90,7 @@ impl SpawnedTask for InProcessSpawnedTask {
     }
 
     async fn kill(&mut self) -> Result<(), Report<TaskError>> {
+        event!(Level::DEBUG, task_id = %self.task_id, "killing task");
         if let Some(task) = self.task.as_ref() {
             task.abort();
         }
@@ -107,6 +109,8 @@ impl SpawnedTask for InProcessSpawnedTask {
             Ok(Err(e)) => WorkerResult::Err(WorkerError::from_error(e.retryable(), e)),
             Err(e) => WorkerResult::Err(WorkerError::from_error(true, e)),
         };
+
+        event!(Level::DEBUG, task_id = %self.task_id, ?result, "task finished");
 
         let result = WorkerOutput {
             result,

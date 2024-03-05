@@ -4,6 +4,7 @@ use error_stack::{Report, ResultExt};
 use futures::Future;
 use serde::Serialize;
 use thiserror::Error;
+use tokio::time::timeout;
 use tracing::{event, info, Level};
 use uuid::Uuid;
 
@@ -183,15 +184,7 @@ async fn normal_run() {
     };
 
     let status = StatusCollector::new(10, true);
-    let manager = JobManager::new(
-        SchedulerBehavior {
-            max_concurrent_tasks: None,
-            max_retries: 2,
-            slow_task_behavior: SlowTaskBehavior::Wait,
-        },
-        status.sender.clone(),
-        None,
-    );
+    let manager = JobManager::new(status.sender.clone());
 
     task.run(&manager).await.expect("Run succeeded");
 }
@@ -211,15 +204,7 @@ async fn single_stage() {
     };
 
     let status = StatusCollector::new(10, true);
-    let manager = JobManager::new(
-        SchedulerBehavior {
-            max_concurrent_tasks: None,
-            max_retries: 2,
-            slow_task_behavior: SlowTaskBehavior::Wait,
-        },
-        status.sender.clone(),
-        None,
-    );
+    let manager = JobManager::new(status.sender.clone());
 
     let mut result = task_data
         .run(&manager)
@@ -266,15 +251,11 @@ async fn tail_retry() {
     };
 
     let status = StatusCollector::new(10, true);
-    let manager = JobManager::new(
-        SchedulerBehavior {
-            max_concurrent_tasks: None,
-            max_retries: 2,
+    let manager =
+        JobManager::new(status.sender.clone()).with_scheduler_behavior(SchedulerBehavior {
             slow_task_behavior: SlowTaskBehavior::RerunLastN(2),
-        },
-        status.sender.clone(),
-        None,
-    );
+            ..Default::default()
+        });
 
     let mut result = task_data
         .run(&manager)
@@ -320,15 +301,7 @@ async fn retry_failures() {
     };
 
     let status = StatusCollector::new(10, true);
-    let manager = JobManager::new(
-        SchedulerBehavior {
-            max_concurrent_tasks: None,
-            max_retries: 2,
-            slow_task_behavior: SlowTaskBehavior::Wait,
-        },
-        status.sender.clone(),
-        None,
-    );
+    let manager = JobManager::new(status.sender.clone());
 
     let mut result = task_data
         .run(&manager)
@@ -374,15 +347,7 @@ async fn permanent_failure_task_error() {
     };
 
     let status = StatusCollector::new(10, true);
-    let manager = JobManager::new(
-        SchedulerBehavior {
-            max_concurrent_tasks: None,
-            max_retries: 2,
-            slow_task_behavior: SlowTaskBehavior::Wait,
-        },
-        status.sender.clone(),
-        None,
-    );
+    let manager = JobManager::new(status.sender.clone());
 
     let result = task_data.run(&manager).await.expect_err("Run failed");
 
@@ -434,15 +399,7 @@ async fn too_many_retries() {
     };
 
     let status = StatusCollector::new(10, true);
-    let manager = JobManager::new(
-        SchedulerBehavior {
-            max_concurrent_tasks: None,
-            max_retries: 2,
-            slow_task_behavior: SlowTaskBehavior::Wait,
-        },
-        status.sender.clone(),
-        None,
-    );
+    let manager = JobManager::new(status.sender.clone());
 
     let result = task_data.run(&manager).await.expect_err("Run failed");
 
@@ -483,15 +440,7 @@ async fn task_panicked() {
     };
 
     let status = StatusCollector::new(10, true);
-    let manager = JobManager::new(
-        SchedulerBehavior {
-            max_concurrent_tasks: None,
-            max_retries: 2,
-            slow_task_behavior: SlowTaskBehavior::Wait,
-        },
-        status.sender.clone(),
-        None,
-    );
+    let manager = JobManager::new(status.sender.clone());
 
     let mut result = task_data
         .run(&manager)
@@ -536,15 +485,7 @@ async fn task_payload_serialize_failure() {
     };
 
     let status = StatusCollector::new(10, true);
-    let manager = JobManager::new(
-        SchedulerBehavior {
-            max_concurrent_tasks: None,
-            max_retries: 2,
-            slow_task_behavior: SlowTaskBehavior::Wait,
-        },
-        status.sender.clone(),
-        None,
-    );
+    let manager = JobManager::new(status.sender.clone());
 
     let result = task_data.run(&manager).await.expect_err("Run failed");
 
@@ -590,15 +531,11 @@ async fn max_concurrent_tasks() {
     };
 
     let status = StatusCollector::new(10, true);
-    let manager = JobManager::new(
-        SchedulerBehavior {
+    let manager =
+        JobManager::new(status.sender.clone()).with_scheduler_behavior(SchedulerBehavior {
             max_concurrent_tasks: Some(2),
-            max_retries: 2,
-            slow_task_behavior: SlowTaskBehavior::Wait,
-        },
-        status.sender.clone(),
-        None,
-    );
+            ..Default::default()
+        });
 
     let result = task_data.run(&manager).await.expect("Run succeeded");
     assert_eq!(result.len(), 5);
@@ -641,15 +578,7 @@ async fn wait_unordered() {
     };
 
     let status = StatusCollector::new(10, true);
-    let manager = JobManager::new(
-        SchedulerBehavior {
-            max_concurrent_tasks: None,
-            max_retries: 2,
-            slow_task_behavior: SlowTaskBehavior::Wait,
-        },
-        status.sender.clone(),
-        None,
-    );
+    let manager = JobManager::new(status.sender.clone());
 
     let result = task_data
         .run(&manager)
@@ -680,7 +609,7 @@ async fn wait_unordered() {
 }
 
 #[tokio::test]
-async fn cancel_job() {
+async fn cancel_manager() {
     let spawner = Arc::new(InProcessSpawner::new(|info| async move {
         let duration = 1000;
         tokio::time::sleep(Duration::from_millis(duration as u64)).await;
@@ -688,15 +617,7 @@ async fn cancel_job() {
     }));
 
     let (status_tx, status_rx) = StatusSender::new(true);
-    let manager = JobManager::new(
-        SchedulerBehavior {
-            max_concurrent_tasks: None,
-            max_retries: 2,
-            slow_task_behavior: SlowTaskBehavior::Wait,
-        },
-        status_tx,
-        None,
-    );
+    let manager = JobManager::new(status_tx);
 
     let mut job = manager.new_job();
 
@@ -719,11 +640,82 @@ async fn cancel_job() {
 
     manager.cancel();
 
-    let task_results = stage_rx.collect().await.expect_err("done");
-    println!("task results: {:?}", task_results);
+    let task_results = stage_rx.collect().await.expect("done");
+    assert!(task_results.is_empty());
+
     let err = job
         .wait()
         .await
         .expect_err("Job wait should return an error");
     assert!(err.current_context().cancelled);
+}
+
+#[tokio::test]
+async fn cancel_job_on_error() {
+    let spawner = Arc::new(InProcessSpawner::new(|info| async move {
+        let duration = 1000;
+
+        if info.task_id.stage == 0 && info.task_id.task == 2 {
+            event!(Level::INFO, "Failing task {}", info.task_id);
+            Err(TaskError::failed(info.task_id, false))
+        } else {
+            event!(Level::INFO, "Working task {}", info.task_id);
+            tokio::time::sleep(Duration::from_millis(duration as u64)).await;
+            Ok(format!("result {}", info.task_id))
+        }
+    }));
+
+    let (status_tx, status_rx) = StatusSender::new(true);
+    let manager = JobManager::new(status_tx);
+
+    let mut job = manager.new_job();
+
+    let (stage1_tx, stage1_rx) = job.add_stage().await;
+    let (stage2_tx, stage2_rx) = job.add_stage().await;
+    let num_tasks = 10;
+    for _ in 0..num_tasks {
+        stage1_tx
+            .push(TestSubTaskDef {
+                spawn_name: "test".to_string(),
+                spawner: spawner.clone(),
+                fail_serialize: false,
+            })
+            .await;
+    }
+
+    for _ in 0..num_tasks {
+        stage2_tx
+            .push(TestSubTaskDef {
+                spawn_name: "test".to_string(),
+                spawner: spawner.clone(),
+                fail_serialize: false,
+            })
+            .await;
+    }
+
+    // Wait to get at least one status update, indicating that the above has started.
+    let st = status_rx.recv_async().await.ok();
+    println!("status: {:?}", st);
+    tokio::time::sleep(Duration::from_millis(50)).await;
+
+    let stage1_result = stage1_rx.collect().await.expect_err("finishing stage");
+    assert!(matches!(
+        stage1_result.current_context().kind,
+        TaskErrorKind::Failed(false)
+    ));
+    assert_eq!(stage1_result.current_context().task_id.task, 2);
+
+    let stage2_result = timeout(Duration::from_secs(5), stage2_rx.collect())
+        .await
+        .expect("finishing stage 2 timed out")
+        .expect("finishing stage 2 should not erro");
+    println!("stage2_result: {:?}", stage2_result);
+    assert!(stage2_result.is_empty());
+
+    let err = job
+        .wait()
+        .await
+        .expect_err("Job wait should return an error");
+    println!("err: {:?}", err);
+    assert_eq!(err.current_context().stage, 0);
 }

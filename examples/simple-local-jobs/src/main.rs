@@ -51,7 +51,9 @@ async fn run_manager() {
 
     let max_total_jobs = Arc::new(tokio::sync::Semaphore::new(20));
 
-    let manager = JobManager::new(scheduler, status_sender, Some(max_total_jobs));
+    let manager = JobManager::new(status_sender)
+        .with_scheduler_behavior(scheduler)
+        .with_global_semaphore(max_total_jobs);
 
     // Create 10 independent Jobs. A Job manages all the subtasks for a related task.
     let mut joins = JoinSet::new();
