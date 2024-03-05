@@ -39,9 +39,9 @@ pub struct FargateTaskArgs {
     pub assign_public_ip: bool,
 
     /// Override the CPU limit for the container. This is in units of 1024 = 1 vCPU
-    pub cpu: Option<i32>,
-    /// Override the memory limit for the container, in MB
-    pub memory: Option<i32>,
+    pub cpu: Option<String>,
+    /// Override the memory limit for the container, in MB if you don't provide a unit.
+    pub memory: Option<String>,
     /// Override the amount of ephemeral storage available
     pub ephemeral_storage: Option<EphemeralStorage>,
 
@@ -172,12 +172,12 @@ impl FargateSpawner {
                     .container_overrides(
                         ContainerOverride::builder()
                             .name(args.container_name)
-                            .set_cpu(args.cpu)
-                            .set_memory_reservation(args.memory)
                             .set_environment(Some(env))
                             .set_command(command)
                             .build(),
                     )
+                    .set_cpu(args.cpu)
+                    .set_memory(args.memory)
                     .set_ephemeral_storage(args.ephemeral_storage)
                     .build(),
             );

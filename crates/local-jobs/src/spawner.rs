@@ -12,7 +12,7 @@ use futures::stream::TryStreamExt;
 use rand::Rng;
 use serde::Serialize;
 use smelter_job_manager::{LogSender, SpawnedTask, TaskError};
-use smelter_worker::{SubtaskId, WorkerInput};
+use smelter_worker::{SubtaskId, WorkerInputPayload};
 use tokio::io::{AsyncBufReadExt, AsyncReadExt, AsyncWriteExt};
 use tokio_stream::wrappers::LinesStream;
 
@@ -47,7 +47,7 @@ impl LocalSpawner {
             .change_context(TaskError::did_not_start(task_id, false))
             .attach_printable("Failed to create temporary directory for input")?;
 
-        let input = serde_json::to_vec(&WorkerInput::new(task_id, input))
+        let input = serde_json::to_vec(&WorkerInputPayload::new(task_id, input))
             .change_context(TaskError::task_generation_failed(task_id))?;
 
         input_file
@@ -215,7 +215,8 @@ mod tests {
             .expect("Spawning task");
 
         let output = task.wait().await.expect("Waiting for task");
-        let output: WorkerInput<String> = serde_json::from_slice(&output).expect("Reading output");
+        let output: WorkerInputPayload<String> =
+            serde_json::from_slice(&output).expect("Reading output");
 
         assert_eq!(output.input, "test-output");
     }

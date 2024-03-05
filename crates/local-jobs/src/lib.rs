@@ -6,7 +6,7 @@
 use std::{fmt::Debug, path::PathBuf};
 
 use error_stack::{Report, ResultExt};
-use smelter_worker::{WorkerInput, WorkerOutput, WrapperError};
+use smelter_worker::{WorkerInputPayload, WorkerOutput, WrapperError};
 
 pub mod spawner;
 
@@ -39,7 +39,7 @@ impl LocalWorkerInfo {
     /// sense for your task.
     pub async fn read_input<PAYLOAD: serde::de::DeserializeOwned + Send + 'static>(
         &self,
-    ) -> Result<WorkerInput<PAYLOAD>, Report<WrapperError>> {
+    ) -> Result<WorkerInputPayload<PAYLOAD>, Report<WrapperError>> {
         let input = self.input.clone();
         let worker_input = tokio::task::spawn_blocking(move || {
             let file = std::fs::File::open(&input)
@@ -47,7 +47,7 @@ impl LocalWorkerInfo {
                 .attach_printable_lazy(|| input.display().to_string())?;
             let file = std::io::BufReader::new(file);
 
-            serde_json::from_reader::<_, WorkerInput<PAYLOAD>>(file)
+            serde_json::from_reader::<_, WorkerInputPayload<PAYLOAD>>(file)
                 .change_context(WrapperError::UnexpectedInput)
         })
         .await
