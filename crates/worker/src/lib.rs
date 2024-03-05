@@ -3,12 +3,14 @@
 
 //! Common code used for communicating between the job manager and worker tasks.
 
-use std::{collections::HashMap, fmt::Debug, io::Read};
+use std::{collections::HashMap, fmt::Debug, future::Future, io::Read};
 
+use error_stack::Report;
 #[cfg(feature = "opentelemetry")]
 use opentelemetry::sdk::propagation::TraceContextPropagator;
 use serde::{de::DeserializeOwned, Deserialize, Serialize};
 use thiserror::Error;
+use tracing::{event, Level};
 use uuid::Uuid;
 
 #[cfg(feature = "stats")]
@@ -67,15 +69,32 @@ pub fn propagate_tracing_context(trace_context: &HashMap<String, String>) {
 }
 
 #[derive(Debug)]
-#[cfg_attr(feature = "worker-side", derive(Serialize))]
-#[cfg_attr(feature = "spawner-side", derive(Deserialize))]
 /// The input payload that a worker will read when starting
 pub struct WorkerInput<T> {
     /// The ID for this task
     pub task_id: SubtaskId,
     #[cfg(feature = "opentelemetry")]
+    /// Propagated trace context so that this worker can show up as a child of the parent span
+    /// from the spawner.
+    pub trace_context: std::collections::HashMap<String, String>,
+    /// Worker-specific input data
+    pub input: T,
+    /// A signal that will change to true if the task has cancelled. It is safe to skip reading the
+    /// value if you are waiting for a change notification; the channel will never be changed to
+    /// `false`.
+    pub cancelled: tokio::sync::watch::Receiver<bool>,
+}
+
+#[derive(Debug)]
+#[cfg_attr(feature = "worker-side", derive(Serialize))]
+#[cfg_attr(feature = "spawner-side", derive(Deserialize))]
+/// The input payload that a worker will read when starting
+pub struct WorkerInputPayload<T> {
+    /// The ID for this task
+    pub task_id: SubtaskId,
+    #[cfg(feature = "opentelemetry")]
     #[serde(default)]
-    /// Propragated trace context so that this worker can show up as a child of the parent span
+    /// Propagated trace context so that this worker can show up as a child of the parent span
     /// from the spawner.
     pub trace_context: std::collections::HashMap<String, String>,
     /// Worker-specific input data
@@ -83,8 +102,8 @@ pub struct WorkerInput<T> {
 }
 
 #[cfg(feature = "spawner-side")]
-impl<T> WorkerInput<T> {
-    /// Create a new [WorkerInput]
+impl<T> WorkerInputPayload<T> {
+    /// Create a new [WorkerInputPayload]
     pub fn new(task_id: SubtaskId, input: T) -> Self {
         #[cfg(feature = "opentelemetry")]
         let trace_context = get_trace_context();
@@ -99,7 +118,7 @@ impl<T> WorkerInput<T> {
 }
 
 #[cfg(feature = "worker-side")]
-impl<T: DeserializeOwned + 'static> WorkerInput<T> {
+impl<T: DeserializeOwned + 'static> WorkerInputPayload<T> {
     /// Propagate the trace context from the spawner into the current span.
     pub fn propagate_tracing_context(&self) {
         #[cfg(feature = "opentelemetry")]
@@ -110,7 +129,7 @@ impl<T: DeserializeOwned + 'static> WorkerInput<T> {
 
     /// Parse a [WorkerInput] and propagate the trace context, if present.
     pub fn parse(input: impl Read) -> Result<Self, serde_json::Error> {
-        let input: WorkerInput<T> = serde_json::from_reader(input)?;
+        let input: WorkerInputPayload<T> = serde_json::from_reader(input)?;
 
         input.propagate_tracing_context();
 
@@ -244,6 +263,70 @@ impl WrapperError {
             WrapperError::ReadInput => true,
             WrapperError::UnexpectedInput => false,
             WrapperError::WriteOutput => true,
+        }
+    }
+}
+
+/// Run the worker and return its output, ready for writing back to the output payload location.
+/// Usually you will want to call the equivalent `run_worker` function in the platform-specific
+/// module instead.
+pub async fn run_worker<INPUT, F, FUT, OUTPUT, ERR>(
+    input: WorkerInputPayload<INPUT>,
+    f: F,
+) -> Result<WorkerOutput<OUTPUT>, Report<WrapperError>>
+where
+    F: FnOnce(WorkerInput<INPUT>) -> FUT,
+    FUT: Future<Output = Result<OUTPUT, ERR>>,
+    ERR: std::error::Error,
+    INPUT: Debug + DeserializeOwned + Send + 'static,
+    OUTPUT: Debug + Serialize + Send + 'static,
+{
+    #[cfg(feature = "stats")]
+    let stats = stats::track_system_stats();
+
+    let (cancel_tx, cancelled_rx) = tokio::sync::watch::channel(false);
+
+    tokio::task::spawn(async move {
+        let sig = tokio::signal::ctrl_c().await;
+        match sig {
+            Ok(_) => {
+                cancel_tx.send(true).ok();
+            }
+            Err(_) => {
+                event!(Level::WARN, "Failed to listen for SIGINT");
+            }
+        };
+    });
+
+    let input = WorkerInput {
+        task_id: input.task_id,
+        #[cfg(feature = "opentelemetry")]
+        trace_context: input.trace_context,
+        input: input.input,
+        cancelled: cancelled_rx,
+    };
+
+    let job_result = trace_result("running worker", f(input).await);
+
+    let result = WorkerOutput {
+        result: job_result.into(),
+        #[cfg(feature = "stats")]
+        stats: stats.finish().await,
+    };
+
+    Ok(result)
+}
+
+/// Trace the result of an operation.
+pub fn trace_result<R: Debug, E: Debug>(message: &str, result: Result<R, E>) -> Result<R, E> {
+    match result {
+        Ok(o) => {
+            event!(Level::INFO, output=?o, "{}", message);
+            Ok(o)
+        }
+        Err(e) => {
+            event!(Level::ERROR, error=?e, "{}", message);
+            Err(e)
         }
     }
 }

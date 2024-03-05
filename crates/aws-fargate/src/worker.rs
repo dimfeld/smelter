@@ -5,12 +5,16 @@ use aws_sdk_s3::primitives::ByteStream;
 use error_stack::{Report, ResultExt};
 use serde::{de::DeserializeOwned, Serialize};
 use smelter_worker::{
-    propagate_tracing_context, SubtaskId, WorkerError, WorkerInput, WorkerOutput, WorkerResult,
-    WrapperError,
+    propagate_tracing_context, trace_result, SubtaskId, WorkerError, WorkerInput,
+    WorkerInputPayload, WorkerOutput, WorkerResult, WrapperError,
 };
-use tracing::{event, Level};
 
 use crate::{AwsError, INPUT_LOCATION_VAR, OTEL_CONTEXT_VAR, OUTPUT_LOCATION_VAR, SUBTASK_ID_VAR};
+
+/// A convenience function to create an S3 client
+pub async fn create_s3_client() -> aws_sdk_s3::Client {
+    aws_sdk_s3::Client::new(&aws_config::load_from_env().await)
+}
 
 /// The [FargateWorker] manages error handling, payload I/O, and other Smelter-specfic framework
 /// tasks.
@@ -76,23 +80,48 @@ impl FargateWorker {
         })
     }
 
-    /// When the task does not require a payload, use this function to skip trying to read it,
-    /// while still retrieving the relevant metadata and tracing context.
-    pub fn initialize_without_payload(&self) -> WorkerInput<()> {
-        let input = WorkerInput {
-            task_id: self.task_id,
-            trace_context: self.trace_context.clone(),
-            input: (),
-        };
+    /// Run the worker and record the output for the job spawner to retrieve.
+    pub async fn run<INPUT, F, FUT, OUTPUT, ERR>(
+        &self,
+        input: WorkerInputPayload<INPUT>,
+        f: F,
+    ) -> Result<(), Report<WrapperError>>
+    where
+        F: FnOnce(WorkerInput<INPUT>) -> FUT,
+        FUT: Future<Output = Result<OUTPUT, ERR>>,
+        ERR: std::error::Error,
+        INPUT: Debug + DeserializeOwned + Send + 'static,
+        OUTPUT: Debug + Serialize + Send + 'static,
+    {
+        let result = smelter_worker::run_worker(input, f).await?;
+        trace_result("writing output", self.write_output(result).await)?;
+        Ok(())
+    }
 
-        input.propagate_tracing_context();
-        input
+    /// Read the input payload. If it fails to read, this function will attempt to write an error
+    /// to the output location before returning an error.
+    pub async fn read_input<PAYLOAD: Debug + DeserializeOwned + Send + 'static>(
+        &self,
+    ) -> Result<WorkerInputPayload<PAYLOAD>, Report<WrapperError>> {
+        let result = trace_result("reading input", self.read_input_internal::<PAYLOAD>().await);
+        if let Err(e) = &result {
+            let retryable = e.current_context().retryable();
+            let error = WorkerError::from_error(retryable, e);
+            self.write_output::<()>(WorkerOutput {
+                result: WorkerResult::Err(error),
+                #[cfg(feature = "stats")]
+                stats: None,
+            })
+            .await?;
+        }
+
+        result
     }
 
     /// Read the input payload and initialize tracing context.
-    pub async fn read_input<PAYLOAD: DeserializeOwned + Send + 'static>(
+    async fn read_input_internal<PAYLOAD: DeserializeOwned + Send + 'static>(
         &self,
-    ) -> Result<WorkerInput<PAYLOAD>, Report<WrapperError>> {
+    ) -> Result<WorkerInputPayload<PAYLOAD>, Report<WrapperError>> {
         #[cfg(feature = "opentelemetry")]
         propagate_tracing_context(&self.trace_context);
 
@@ -123,7 +152,7 @@ impl FargateWorker {
             .change_context(WrapperError::UnexpectedInput)
             .attach_printable("Deserializing input payload")?;
 
-        let input = WorkerInput {
+        let input = WorkerInputPayload {
             task_id: self.task_id,
             #[cfg(feature = "opentelemetry")]
             trace_context: self.trace_context.clone(),
@@ -131,6 +160,19 @@ impl FargateWorker {
         };
 
         Ok(input)
+    }
+
+    /// When the task does not require a payload, use this function to skip trying to read it,
+    /// while still retrieving the relevant metadata and tracing context.
+    pub fn initialize_without_payload(&self) -> WorkerInputPayload<()> {
+        let input = WorkerInputPayload {
+            task_id: self.task_id,
+            trace_context: self.trace_context.clone(),
+            input: (),
+        };
+
+        input.propagate_tracing_context();
+        input
     }
 
     /// Write the worker result to a location that the spawner expects to find it.
@@ -159,93 +201,5 @@ impl FargateWorker {
             .attach_printable("Writing output payload")?;
 
         Ok(())
-    }
-}
-
-/// Run a worker that doesn't expect any input payload, and record the output for the job spawner to retrieve.
-pub async fn run_worker_without_input<F, FUT, OUTPUT, ERR>(f: F) -> Result<(), Report<WrapperError>>
-where
-    F: FnOnce(WorkerInput<()>) -> FUT,
-    FUT: Future<Output = Result<OUTPUT, ERR>>,
-    ERR: std::error::Error,
-    OUTPUT: Debug + Serialize + Send + 'static,
-{
-    #[cfg(feature = "stats")]
-    let stats = smelter_worker::stats::track_system_stats();
-
-    let config = aws_config::load_from_env().await;
-    let worker = FargateWorker::from_env(aws_sdk_s3::Client::new(&config))?;
-
-    let input = worker.initialize_without_payload();
-    let job_result = f(input).await;
-
-    let result = WorkerOutput {
-        result: job_result.into(),
-        #[cfg(feature = "stats")]
-        stats: stats.finish().await,
-    };
-
-    worker.write_output(result).await?;
-
-    Ok(())
-}
-
-/// Run the worker and record the output for the job spawner to retrieve.
-pub async fn run_worker<INPUT, F, FUT, OUTPUT, ERR>(f: F) -> Result<(), Report<WrapperError>>
-where
-    F: FnOnce(WorkerInput<INPUT>) -> FUT,
-    FUT: Future<Output = Result<OUTPUT, ERR>>,
-    ERR: std::error::Error,
-    INPUT: Debug + DeserializeOwned + Send + 'static,
-    OUTPUT: Debug + Serialize + Send + 'static,
-{
-    #[cfg(feature = "stats")]
-    let stats = smelter_worker::stats::track_system_stats();
-
-    let config = aws_config::load_from_env().await;
-    let worker = trace_result(
-        "Initializing",
-        FargateWorker::from_env(aws_sdk_s3::Client::new(&config)),
-    )?;
-
-    let input = match trace_result("reading input", worker.read_input().await) {
-        Ok(input) => input,
-        Err(e) => {
-            let retryable = e.current_context().retryable();
-            let error = WorkerError::from_error(retryable, e);
-            worker
-                .write_output::<OUTPUT>(WorkerOutput {
-                    result: WorkerResult::Err(error),
-                    #[cfg(feature = "stats")]
-                    stats: None,
-                })
-                .await?;
-            return Ok(());
-        }
-    };
-
-    let job_result = trace_result("running worker", f(input).await);
-
-    let result = WorkerOutput {
-        result: job_result.into(),
-        #[cfg(feature = "stats")]
-        stats: stats.finish().await,
-    };
-
-    trace_result("writing output", worker.write_output(result).await)?;
-
-    Ok(())
-}
-
-fn trace_result<R: Debug, E: Debug>(message: &str, result: Result<R, E>) -> Result<R, E> {
-    match result {
-        Ok(o) => {
-            event!(Level::INFO, output=?o, "{}", message);
-            Ok(o)
-        }
-        Err(e) => {
-            event!(Level::ERROR, error=?e, "{}", message);
-            Err(e)
-        }
     }
 }
