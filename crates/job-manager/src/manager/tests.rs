@@ -1,4 +1,9 @@
-use std::{borrow::Cow, fmt::Debug, sync::Arc, time::Duration};
+use std::{
+    borrow::Cow,
+    fmt::Debug,
+    sync::{atomic::AtomicUsize, Arc},
+    time::Duration,
+};
 
 use error_stack::{Report, ResultExt};
 use futures::Future;
@@ -652,7 +657,10 @@ async fn cancel_manager() {
 
 #[tokio::test]
 async fn cancel_job_on_error() {
-    let spawner = Arc::new(InProcessSpawner::new(|info| async move {
+    let started = Arc::new(AtomicUsize::new(0));
+    let finished = Arc::new(AtomicUsize::new(0));
+
+    let mut spawner = InProcessSpawner::new(|info| async move {
         let duration = 1000;
 
         if info.task_id.stage == 0 && info.task_id.task == 2 {
@@ -660,10 +668,16 @@ async fn cancel_job_on_error() {
             Err(TaskError::failed(info.task_id, false))
         } else {
             event!(Level::INFO, "Working task {}", info.task_id);
+            started.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
             tokio::time::sleep(Duration::from_millis(duration as u64)).await;
+            finished.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
             Ok(format!("result {}", info.task_id))
         }
-    }));
+    });
+
+    spawner.kill_time = Some(Duration::from_millis(200));
+
+    let spawner = Arc::new(spawner);
 
     let (status_tx, status_rx) = StatusSender::new(true);
     let manager = JobManager::new(status_tx);

@@ -1,7 +1,7 @@
 //! Run workers in the same process as the scheduler. This is only really useful for some unit
 //! tests.
 
-use std::{borrow::Cow, future::Future};
+use std::{borrow::Cow, future::Future, time::Duration};
 
 use ahash::HashMap;
 use async_trait::async_trait;
@@ -29,6 +29,7 @@ where
 {
     task_fn: FUNC,
     pub fail_to_spawn: bool,
+    pub kill_time: Option<Duration>,
 }
 
 impl<F, FUNC> InProcessSpawner<F, FUNC>
@@ -43,6 +44,7 @@ where
         Self {
             task_fn,
             fail_to_spawn: false,
+            kill_time: None,
         }
     }
 
@@ -62,6 +64,8 @@ where
             .change_context(TaskError::task_generation_failed(task_id))?;
         let task = InProcessSpawnedTask {
             task_id,
+            kill_time: self.kill_time,
+            kill: tokio::sync::Notify::new(),
             task: Some(tokio::task::spawn(async move {
                 let result = (task_fn)(InProcessTaskInfo {
                     task_name: task_name.to_string(),
@@ -80,6 +84,8 @@ where
 
 pub struct InProcessSpawnedTask {
     task_id: SubtaskId,
+    kill_time: Option<Duration>,
+    kill: tokio::sync::Notify,
     task: Option<JoinHandle<Result<String, TaskError>>>,
 }
 
@@ -91,8 +97,10 @@ impl SpawnedTask for InProcessSpawnedTask {
 
     async fn kill(&mut self) -> Result<(), Report<TaskError>> {
         event!(Level::DEBUG, task_id = %self.task_id, "killing task");
-        if let Some(task) = self.task.as_ref() {
-            task.abort();
+        self.kill.notify_one();
+        if let Some(kill_time) = self.kill_time {
+            tokio::time::sleep(kill_time).await;
+            event!(Level::DEBUG, task_id = %self.task_id, "kill finished");
         }
 
         Ok(())
@@ -103,11 +111,18 @@ impl SpawnedTask for InProcessSpawnedTask {
             return Ok(Vec::new());
         };
 
-        let result = task.await;
-        let result = match &result {
-            Ok(Ok(r)) => WorkerResult::Ok(r),
-            Ok(Err(e)) => WorkerResult::Err(WorkerError::from_error(e.retryable(), e)),
-            Err(e) => WorkerResult::Err(WorkerError::from_error(true, e)),
+        let result = tokio::select! {
+            result = task => {
+                match result {
+                    Ok(Ok(r)) => WorkerResult::Ok(r),
+                    Ok(Err(e)) => WorkerResult::Err(WorkerError::from_error(e.retryable(), e)),
+                    Err(e) => WorkerResult::Err(WorkerError::from_error(true, e)),
+                }
+            }
+
+            _ = self.kill.notified() => {
+                WorkerResult::Err(WorkerError::from_error(false, TaskError::cancelled(self.task_id)))
+            }
         };
 
         event!(Level::DEBUG, task_id = %self.task_id, ?result, "task finished");
