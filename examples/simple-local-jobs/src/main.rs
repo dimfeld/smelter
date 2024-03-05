@@ -9,9 +9,10 @@ use std::{borrow::Cow, sync::Arc};
 
 use clap::Parser;
 use error_stack::Report;
+use rand::Rng;
 use smelter_job_manager::{
-    Job, JobManager, LogSender, SchedulerBehavior, SpawnedTask, StatusSender, SubTask, SubtaskId,
-    TaskError,
+    Job, JobManager, LogSender, SchedulerBehavior, SpawnedTask, StageError, StatusSender, SubTask,
+    SubtaskId, TaskError,
 };
 use smelter_local_jobs::spawner::LocalSpawner;
 use tokio::task::JoinSet;
@@ -23,6 +24,14 @@ pub struct Cli {
     /// The mode to run in, if not the manager.
     #[clap(long)]
     mode: Option<String>,
+
+    /// The number of jobs to run
+    #[clap(short, long, default_value = "10")]
+    num_jobs: usize,
+
+    /// Test when a job fails without being able to retry
+    #[clap(long)]
+    fail: bool,
 }
 
 #[tokio::main]
@@ -32,16 +41,16 @@ async fn main() {
 
     if let Some(mode) = args.mode {
         match mode.as_str() {
-            "generate-random" => subtasks::generate_random().await,
+            "generate-random" => subtasks::generate_random(args.fail).await,
             "add-values" => subtasks::add_values().await,
             _ => panic!("Unknown mode: {}", mode),
         }
     } else {
-        run_manager().await;
+        run_manager(args).await;
     }
 }
 
-async fn run_manager() {
+async fn run_manager(args: Cli) {
     let (status_sender, status_rx) = StatusSender::new(true);
     let scheduler = SchedulerBehavior {
         max_retries: 2,
@@ -57,9 +66,9 @@ async fn run_manager() {
 
     // Create 10 independent Jobs. A Job manages all the subtasks for a related task.
     let mut joins = JoinSet::new();
-    for i in 1..=10 {
+    for i in 1..=args.num_jobs {
         let job = manager.new_job();
-        joins.spawn(run_job(i, job));
+        joins.spawn(run_job(i, job, args.fail));
     }
 
     loop {
@@ -70,8 +79,11 @@ async fn run_manager() {
             join = joins.join_next() => {
                 if let Some(job) = join {
                     match job {
-                        Ok(value) => {
-                            println!("Finished job {:?}", value);
+                        Ok((job_index, Ok(_))) => {
+                            println!("Finished job {}", job_index);
+                        }
+                        Ok((job_index, Err(e))) => {
+                            println!("Failed job {}: {e:?}", job_index);
                         }
                         Err(e) => {
                             println!("Failed job {:?}", e);
@@ -85,9 +97,19 @@ async fn run_manager() {
     }
 }
 
-async fn run_job(job_index: usize, mut job: Job) -> usize {
+async fn run_job(
+    job_index: usize,
+    mut job: Job,
+    fail: bool,
+) -> (usize, Result<(), Report<StageError>>) {
     let (stage1_tx, stage1_rx) = job.add_stage().await;
     let (stage2_tx, stage2_rx) = job.add_stage().await;
+
+    let fail_index = if fail {
+        rand::thread_rng().gen_range(0..32)
+    } else {
+        usize::MAX
+    };
 
     for i in 0..32 {
         stage1_tx
@@ -96,6 +118,7 @@ async fn run_job(job_index: usize, mut job: Job) -> usize {
                 task_index: i,
                 mode: "generate-random",
                 input: Vec::new(),
+                fail: i == fail_index,
             })
             .await;
     }
@@ -105,7 +128,14 @@ async fn run_job(job_index: usize, mut job: Job) -> usize {
     let mut stage2_index = 0;
     let mut values = Vec::new();
     while let Some(task) = stage1_rx.recv().await {
-        let result = task.unwrap();
+        let result = match task {
+            Ok(result) => result,
+            Err(e) => {
+                println!("Task error {:?}", e);
+                break;
+            }
+        };
+
         println!(
             "Task {} finished with result {}",
             result.task_def.description(),
@@ -126,6 +156,7 @@ async fn run_job(job_index: usize, mut job: Job) -> usize {
                 task_index: stage2_index,
                 mode: "add-values",
                 input: task_values,
+                fail: false,
             })
             .await;
         stage2_index += 1;
@@ -138,6 +169,7 @@ async fn run_job(job_index: usize, mut job: Job) -> usize {
                 task_index: stage2_index,
                 mode: "add-values",
                 input: values,
+                fail: false,
             })
             .await;
     }
@@ -159,13 +191,16 @@ async fn run_job(job_index: usize, mut job: Job) -> usize {
         }
     }
 
-    job_index
+    let job_result = job.wait().await;
+
+    (job_index, job_result)
 }
 
 #[derive(Debug, Clone)]
 struct Task {
     job_index: usize,
     task_index: usize,
+    fail: bool,
     mode: &'static str,
     input: Vec<usize>,
 }
@@ -185,6 +220,9 @@ impl SubTask for Task {
     ) -> Result<Box<dyn SpawnedTask>, Report<TaskError>> {
         let target = std::env::args().nth(0).unwrap();
         let mut command = tokio::process::Command::new(target);
+        if self.fail {
+            command.arg("--fail");
+        }
         command.args(["--mode", self.mode]);
 
         let task = LocalSpawner::default()
