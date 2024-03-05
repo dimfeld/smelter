@@ -74,12 +74,14 @@ async fn run_subtask_internal<SUBTASK: SubTask>(
         status_sender,
     } = payload;
 
-    let log_sender = status_sender.as_log_sender(task_id);
+    let description = input.description();
+    let log_sender = status_sender.as_log_sender(task_id, description.clone());
 
     let mut task = input.spawn(task_id, log_sender).await?;
     let runtime_id = task.runtime_id().await?;
     status_sender.add(
         task_id,
+        description.clone(),
         StatusUpdateData::Spawned(StatusUpdateSpawnedData {
             runtime_id: runtime_id.clone(),
         }),
@@ -94,7 +96,7 @@ async fn run_subtask_internal<SUBTASK: SubTask>(
                 .map_err(|e| Report::new(SerializedWorkerFailure(e.error)).change_context(TaskError::failed(task_id, e.retryable)))
                 .attach_printable_lazy(|| format!("Job {task_id} Runtime ID {runtime_id}"))?;
 
-            status_sender.add(task_id, StatusUpdateData::Success(
+            status_sender.add(task_id, description.clone(), StatusUpdateData::Success(
                     StatusUpdateSuccessData {
                         output: res.clone(),
                         stats: stats.clone(),
@@ -106,7 +108,7 @@ async fn run_subtask_internal<SUBTASK: SubTask>(
 
         _ = cancel.changed() => {
             task.kill().await.ok();
-            status_sender.add(task_id, StatusUpdateData::Cancelled);
+            status_sender.add(task_id, description.clone(), StatusUpdateData::Cancelled);
             Err(Report::new(TaskError::cancelled(task_id)))
         }
     }

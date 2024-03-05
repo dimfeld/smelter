@@ -198,6 +198,7 @@ impl<SUBTASK: SubTask> StageRunner<SUBTASK> {
                 {
                     self.status_sender.add(
                         task_id,
+                        task_info.input.description(),
                         StatusUpdateData::Retry(e.current_context().kind.clone(), format!("{e:?}")),
                     );
                     task_info.try_num += 1;
@@ -211,6 +212,7 @@ impl<SUBTASK: SubTask> StageRunner<SUBTASK> {
                 } else {
                     self.status_sender.add(
                         task_id,
+                        task_info.input.description(),
                         StatusUpdateData::Failed(
                             e.current_context().kind.clone(),
                             format!("{e:?}"),
@@ -283,6 +285,7 @@ impl<SUBTASK: SubTask> StageRunner<SUBTASK> {
                                                 };
                                             self.status_sender.add(
                                                 id,
+                                                task.input.description(),
                                                 StatusUpdateData::Retry(
                                                     TaskErrorKind::TailRetry,
                                                     format!("{:?}", Report::new(TaskError::tail_retry(id))),

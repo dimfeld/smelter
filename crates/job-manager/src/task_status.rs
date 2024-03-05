@@ -1,4 +1,4 @@
-use std::{fmt::Display, sync::Arc};
+use std::{borrow::Cow, fmt::Display, sync::Arc};
 
 use parking_lot::Mutex;
 
@@ -151,6 +151,8 @@ impl Display for StatusUpdateDataDisplayCustom<'_> {
 pub struct StatusUpdateItem {
     /// The ID of the task
     pub task_id: SubtaskId,
+    /// A readable description of the task
+    pub task_description: Cow<'static, str>,
     /// The timestamp of the update
     pub timestamp: time::OffsetDateTime,
     /// The data of the update
@@ -173,12 +175,13 @@ impl StatusUpdateItem {
         let time = self.timestamp.time();
         write!(
             f,
-            "{date} {hour:02}:{minute:02}:{second:02}.{ms:03} {task_id}: ",
+            "{date} {hour:02}:{minute:02}:{second:02}.{ms:03} {task_description} ({task_id}): ",
             date = self.timestamp.date(),
             hour = time.hour(),
             minute = time.minute(),
             second = time.second(),
             ms = time.millisecond(),
+            task_description = self.task_description,
             task_id = self.task_id,
         )
     }
@@ -214,14 +217,18 @@ impl<'a> Display for StatusUpdateItemCustomFormat<'a> {
 #[derive(Clone)]
 pub struct LogSender {
     task_id: SubtaskId,
+    description: Cow<'static, str>,
     sender: StatusSender,
 }
 
 impl LogSender {
     /// Send a log from a task
     pub fn send(&self, stdout: bool, message: String) {
-        self.sender
-            .add(self.task_id, StatusUpdateData::Log { stdout, message });
+        self.sender.add(
+            self.task_id,
+            self.description.clone(),
+            StatusUpdateData::Log { stdout, message },
+        );
     }
 }
 
@@ -229,6 +236,7 @@ impl std::fmt::Debug for LogSender {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.debug_struct("LogCollector")
             .field("task_id", &self.task_id)
+            .field("description", &self.description)
             .finish()
     }
 }
@@ -249,7 +257,12 @@ impl StatusSender {
     }
 
     /// Send a status update.
-    pub fn add(&self, task_id: SubtaskId, data: impl Into<StatusUpdateData>) {
+    pub fn add(
+        &self,
+        task_id: SubtaskId,
+        description: Cow<'static, str>,
+        data: impl Into<StatusUpdateData>,
+    ) {
         let data = data.into();
         if !self.keep_logs && matches!(&data, StatusUpdateData::Log { .. }) {
             return;
@@ -258,6 +271,7 @@ impl StatusSender {
         self.tx
             .send(StatusUpdateItem {
                 task_id,
+                task_description: description,
                 timestamp: time::OffsetDateTime::now_utc(),
                 data,
             })
@@ -265,9 +279,14 @@ impl StatusSender {
     }
 
     /// Create a copy of this collector that only sends logs
-    pub fn as_log_sender(&self, task_id: SubtaskId) -> Option<LogSender> {
+    pub fn as_log_sender(
+        &self,
+        task_id: SubtaskId,
+        description: Cow<'static, str>,
+    ) -> Option<LogSender> {
         self.keep_logs.then(|| LogSender {
             task_id,
+            description,
             sender: self.clone(),
         })
     }
@@ -301,13 +320,22 @@ impl StatusCollector {
     }
 
     /// Send a status update
-    pub fn add(&self, task_id: SubtaskId, data: impl Into<StatusUpdateData>) {
-        self.sender.add(task_id, data);
+    pub fn add(
+        &self,
+        task_id: SubtaskId,
+        description: Cow<'static, str>,
+        data: impl Into<StatusUpdateData>,
+    ) {
+        self.sender.add(task_id, description, data);
     }
 
     /// Create a copy of this collector that only sends logs
-    pub fn as_log_sender(&self, task_id: SubtaskId) -> Option<LogSender> {
-        self.sender.as_log_sender(task_id)
+    pub fn as_log_sender(
+        &self,
+        task_id: SubtaskId,
+        description: Cow<'static, str>,
+    ) -> Option<LogSender> {
+        self.sender.as_log_sender(task_id, description)
     }
 
     /// Return a copy of the status updates, starting from the beginning.
