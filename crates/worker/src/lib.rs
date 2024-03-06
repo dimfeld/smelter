@@ -10,6 +10,7 @@ use error_stack::Report;
 use opentelemetry::sdk::propagation::TraceContextPropagator;
 use serde::{de::DeserializeOwned, Deserialize, Serialize};
 use thiserror::Error;
+#[cfg(feature = "tracing")]
 use tracing::{event, Level};
 use uuid::Uuid;
 
@@ -293,6 +294,7 @@ where
                 cancel_tx.send(true).ok();
             }
             Err(_) => {
+                #[cfg(feature = "tracing")]
                 event!(Level::WARN, "Failed to listen for SIGINT");
             }
         };
@@ -321,10 +323,12 @@ where
 pub fn trace_result<R: Debug, E: Debug>(message: &str, result: Result<R, E>) -> Result<R, E> {
     match result {
         Ok(o) => {
+            #[cfg(feature = "tracing")]
             event!(Level::INFO, output=?o, "{}", message);
             Ok(o)
         }
         Err(e) => {
+            #[cfg(feature = "tracing")]
             event!(Level::ERROR, error=?e, "{}", message);
             Err(e)
         }
