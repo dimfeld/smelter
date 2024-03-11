@@ -310,6 +310,13 @@ impl SpawnedFargateContainer {
             .map_err(AwsError::from)
             .change_context(TaskError::failed(self.task_id, true))?;
 
+        if let Some(failures) = &task_desc.failures {
+            if !failures.is_empty() {
+                return Err(Report::new(TaskError::failed(self.task_id, true))
+                    .attach_printable(format!("Task failed: {failures:?}")));
+            }
+        }
+
         let task = task_desc.tasks.unwrap().into_iter().next().unwrap();
         let status_label = task.last_status().unwrap_or_default();
 
