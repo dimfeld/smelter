@@ -8,6 +8,7 @@ use aws_sdk_ecs::types::{
     KeyValuePair, NetworkConfiguration, Task, TaskOverride,
 };
 use aws_sdk_s3::primitives::ByteStream;
+use backon::{ExponentialBuilder, Retryable};
 use error_stack::{Report, ResultExt};
 use serde::Serialize;
 use smelter_job_manager::{SpawnedTask, SubtaskId, TaskError, TaskErrorKind};
@@ -300,6 +301,15 @@ pub struct SpawnedFargateContainer {
 
 impl SpawnedFargateContainer {
     async fn get_task_status(&self) -> Result<TaskStatus, Report<TaskError>> {
+        (|| self.single_task_status_call())
+            .retry(&ExponentialBuilder::default())
+            // Task status can return MISSING if we try to read the status too soon after starting it,
+            // so retry in that case.
+            .when(|e| matches!(e.current_context().kind, TaskErrorKind::Lost))
+            .await
+    }
+
+    async fn single_task_status_call(&self) -> Result<TaskStatus, Report<TaskError>> {
         let task_desc = self
             .ecs_client
             .describe_tasks()
@@ -311,13 +321,22 @@ impl SpawnedFargateContainer {
             .change_context(TaskError::failed(self.task_id, true))?;
 
         if let Some(failures) = &task_desc.failures {
-            if !failures.is_empty() {
-                return Err(Report::new(TaskError::failed(self.task_id, true))
+            if let Some(failure) = failures.iter().next() {
+                if failure.reason().map(|r| r == "MISSING").unwrap_or(false) {
+                    return Err(Report::new(TaskError::lost(self.task_id)));
+                }
+
+                return Err(Report::new(TaskError::failed(self.task_id, false))
                     .attach_printable(format!("Task failed: {failures:?}")));
             }
         }
 
-        let task = task_desc.tasks.unwrap().into_iter().next().unwrap();
+        let task = task_desc.tasks.and_then(|v| v.into_iter().next());
+
+        let Some(task) = task else {
+            return Err(Report::new(TaskError::lost(self.task_id)));
+        };
+
         let status_label = task.last_status().unwrap_or_default();
 
         // See https://docs.aws.amazon.com/AmazonECS/latest/developerguide/scheduling_tasks.html#task-lifecycle
