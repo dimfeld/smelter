@@ -214,7 +214,7 @@ impl FargateSpawner {
             check_interval: self.check_interval,
             start_timeout: self
                 .start_timeout
-                .unwrap_or_else(|| Duration::from_secs(120)),
+                .unwrap_or_else(|| Duration::from_secs(240)),
             run_timeout: args.run_timeout,
         })
     }
