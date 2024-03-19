@@ -3,9 +3,12 @@
 use std::{any::Any, time::Duration};
 
 use async_trait::async_trait;
-use aws_sdk_ecs::types::{
-    AssignPublicIp, AwsVpcConfiguration, Container, ContainerOverride, EphemeralStorage,
-    KeyValuePair, NetworkConfiguration, Task, TaskOverride,
+use aws_sdk_ecs::{
+    operation::run_task::{builders::RunTaskFluentBuilder, RunTaskOutput},
+    types::{
+        AssignPublicIp, AwsVpcConfiguration, Container, ContainerOverride, EphemeralStorage,
+        KeyValuePair, NetworkConfiguration, Task, TaskOverride,
+    },
 };
 use aws_sdk_s3::primitives::ByteStream;
 use backon::{ExponentialBuilder, Retryable};
@@ -183,19 +186,17 @@ impl FargateSpawner {
                     .build(),
             );
 
-        let task = op
-            .send()
-            .await
-            .map_err(AwsError::from)
-            .change_context(TaskError::did_not_start(task_id, false))
-            .attach_printable("Failed to start task")?;
+        let task_start_retry = ExponentialBuilder::default()
+            .with_jitter()
+            .with_min_delay(Duration::from_secs(1))
+            .with_max_delay(Duration::from_secs(10))
+            .with_max_times(10);
 
-        if let Some(failures) = &task.failures {
-            if !failures.is_empty() {
-                return Err(Report::new(TaskError::did_not_start(task_id, true))
-                    .attach_printable(format!("Task failed: {failures:?}")));
-            }
-        }
+        let task = (|| self.send_run_task_request(task_id, op.clone()))
+            .retry(&task_start_retry)
+            .when(|(capacity_error, _)| *capacity_error)
+            .await
+            .map_err(|(_, e)| e)?;
 
         let task = task.tasks.and_then(|v| v.into_iter().next());
 
@@ -217,6 +218,36 @@ impl FargateSpawner {
                 .unwrap_or_else(|| Duration::from_secs(240)),
             run_timeout: args.run_timeout,
         })
+    }
+
+    async fn send_run_task_request(
+        &self,
+        task_id: SubtaskId,
+        op: RunTaskFluentBuilder,
+    ) -> Result<RunTaskOutput, (bool, Report<TaskError>)> {
+        let task = op
+            .send()
+            .await
+            .map_err(AwsError::from)
+            .change_context(TaskError::did_not_start(task_id, false))
+            .attach_printable("Failed to start task")
+            .map_err(|e| (false, e))?;
+
+        if let Some(failures) = &task.failures {
+            if let Some(failure) = failures.first() {
+                let capacity_error = failure
+                    .reason()
+                    .map(|r| r.contains("Capacity"))
+                    .unwrap_or(false);
+                return Err((
+                    capacity_error,
+                    Report::new(TaskError::did_not_start(task_id, true))
+                        .attach_printable(format!("Task failed: {failures:?}")),
+                ));
+            }
+        }
+
+        Ok(task)
     }
 
     async fn write_input_payload(
